@@ -58,8 +58,8 @@ jobs:
           # 动态决定是否喂代理环境变量
         run: |
           if [ -n "$PROXY_STR" ]; then
-            echo "启用 BROWSER_PROXY 走代理节点隧道"
-            export BROWSER_PROXY="socks5://127.0.0.1:8080"
+            echo "启用 BROWSER_PROXY 走代理节点隧道 (使用更稳定的 HTTP 协议)"
+            export BROWSER_PROXY="http://127.0.0.1:8080"
           else
             echo "未配置代理，使用原生 IP 直接访问"
           fi
