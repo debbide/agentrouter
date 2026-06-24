@@ -736,7 +736,39 @@ def compute_result(data: dict) -> bool:
 # 代理预检 & Cookie 注入
 # ─────────────────────────────────────────────
 
-def check_proxy_connectivity(sb: SB) -> None:
+def check_github_login_status(sb: SB) -> None:
+    """打开 github.com 截图推送到 TG，直观确认 GitHub 登录状态。"""
+    log("检查 GitHub 登录状态...")
+    try:
+        sb.driver.set_page_load_timeout(15)
+        sb.open("https://github.com")
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        time.sleep(2)
+
+        # 用 JS 读取登录状态
+        login_info = sb.driver.execute_script("""
+            const meta = document.querySelector('meta[name="user-login"]');
+            const avatar = document.querySelector('.avatar-user, [data-login]');
+            return {
+                userLogin: meta ? meta.getAttribute('content') : null,
+                hasAvatar: !!avatar,
+                title: document.title
+            };
+        """)
+        if isinstance(login_info, dict) and login_info.get("userLogin"):
+            msg = f"✅ GitHub 已登录: @{login_info['userLogin']}"
+        else:
+            msg = f"❌ GitHub 未登录 (title={login_info.get('title') if isinstance(login_info, dict) else '?'})"
+        log(msg)
+        debug_screenshot_and_push(sb, f"github_status")
+        send_tg_message(f"🔍 GitHub 登录状态检查\n{msg}")
+    except Exception as exc:
+        log(f"GitHub 状态检查失败: {exc}")
+    finally:
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+
+
+
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     if not proxy:
         log("未配置 BROWSER_PROXY，跳过代理预检")
@@ -846,8 +878,8 @@ def main() -> None:
             # GH_COOKIE 注入（带超时保护）
             inject_github_cookie(sb)
 
-            # ✅ 注入后立即截图，确认 GitHub 当前登录状态
-            debug_screenshot_and_push(sb, "after_cookie_inject")
+            # ✅ 启动后先去 github.com 截图，直接确认 GitHub 登录状态
+            check_github_login_status(sb)
 
             open_url(sb, SITE_URL, "site")
 
