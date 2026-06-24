@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-06-24-debug-screenshot"
+SCRIPT_REVISION = "2026-06-24-profile-mode"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -762,7 +762,14 @@ def inject_github_cookie(sb: SB) -> None:
     gh_cookie = (os.environ.get("GH_COOKIE") or "").strip()
     if not gh_cookie:
         return
-    log("检测到环境变量 GH_COOKIE，开始执行身份注入...")
+
+    # ✅ 有 Chrome Profile 时跳过注入：Profile 里已有登录态，注入反而可能干扰
+    profile_dir = (os.environ.get("BROWSER_USER_DATA_DIR") or "").strip()
+    if profile_dir and Path(profile_dir).exists():
+        log(f"检测到 Chrome Profile 目录，跳过 GH_COOKIE 注入（Profile 优先）: {profile_dir}")
+        return
+
+    log("未检测到 Chrome Profile，使用 GH_COOKIE 注入...")
     try:
         sb.driver.set_page_load_timeout(15)
         sb.open("https://github.com/404")
@@ -788,7 +795,7 @@ def inject_github_cookie(sb: SB) -> None:
         "httpOnly": True,
         "sameSite": "Strict",
     })
-    log("GitHub 尊贵身份注入完成！")
+    log("GitHub Cookie 注入完成！")
 
 
 # ─────────────────────────────────────────────
