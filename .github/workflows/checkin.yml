@@ -1,4 +1,4 @@
-name: 自动签到任务 (Sing-Box 干净 IP 版)
+name: 自动签到任务
 
 on:
   workflow_dispatch: # 允许手动执行
