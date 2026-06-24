@@ -462,6 +462,13 @@ def click_github_login(sb: SB) -> None:
         subprocess.run(["xdotool", "mousemove", x, y], check=True, timeout=5)
         time.sleep(0.15)
         subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
+        
+        # 强制兜底：xvfb 虚拟屏幕可能导致 xdotool 坐标漂移点击落空。如果没跳走，补一刀！
+        time.sleep(1.5)
+        if "login" in current_url_safe(sb):
+            log("xdotool 似乎未生效，强制启用 webdriver 兜底点击...")
+            webdriver_click_github_login(sb)
+            
         return
     except Exception as exc:
         log(f"xdotool GitHub click failed, fallback to WebDriver click: {exc}")
@@ -665,6 +672,15 @@ def main() -> None:
                     "sameSite": "Strict"
                 })
                 log("Github 尊贵身份注入完成！")
+            
+            try:
+                sb.open("https://api.ipify.org")
+                ip_text = page_text_sample(sb, 50).strip()
+                # 打码 IP 前两段，保护节点隐私 (例如 192.168.1.1 变成 ***.***.1.1)
+                masked_ip = "***.***." + ".".join(ip_text.split(".")[-2:]) if "." in ip_text else "隐匿 IP"
+                log(f"【代理检查】浏览器真实出口 IP: {masked_ip}")
+            except Exception as e:
+                log(f"【代理检查】获取 IP 失败: {e}")
             # ==================================================
 
             open_url(sb, SITE_URL, "site")
