@@ -36,16 +36,16 @@ jobs:
           curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
           tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
           sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
-          
+
           # 生成 config.json
           python convert_proxy.py
-          
+
           # 后台静默挂起代理隧道
           nohup sing-box run -c config.json > singbox.log 2>&1 &
-          
+
           # 等待隧道连通
           sleep 3
-          
+
           # 验证代理端口是否启动 (为保护节点隐私，不打印具体 IP)
           curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！" https://api.ipify.org || echo "代理可能未就绪，继续执行"
 
@@ -55,8 +55,7 @@ jobs:
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          AGENTROUTER_USE_UC: 1
-          # 动态决定是否喂代理环境变量
+          # ✅ 已移除 AGENTROUTER_USE_UC，不再启用 UC 模式
         run: |
           if [ -n "$PROXY_STR" ]; then
             echo "启用 BROWSER_PROXY 走代理节点隧道 (使用更稳定的 HTTP 协议)"
