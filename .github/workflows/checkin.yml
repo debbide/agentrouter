@@ -4,18 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       setup_profile:
-        description: '首次初始化 Profile？（输入 true 进入 VNC 手动登录模式）'
+        description: '首次初始化 Profile？（输入 true 进入 noVNC 手动登录模式）'
         required: false
         default: 'false'
   schedule:
     - cron: '30 0 * * *' # 每天 UTC 0:30 (北京时间 8:30)
 
-# ─────────────────────────────────────────────────────────────
-# JOB 1：首次初始化 Profile（手动触发，输入 setup_profile=true）
-# ─────────────────────────────────────────────────────────────
+# ✅ 防止并发导致 cache key 冲突
+concurrency:
+  group: agentrouter-checkin
+  cancel-in-progress: true
+
 jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1：首次初始化 Profile（手动触发，输入 setup_profile=true）
+  # ─────────────────────────────────────────────────────────────
   setup-profile:
-    name: 🔧 首次初始化 Chrome Profile（VNC 手动登录）
+    name: 🔧 首次初始化 Chrome Profile（noVNC + cloudflared）
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.setup_profile == 'true'
     steps:
@@ -32,7 +37,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install seleniumbase
           sbase install chromedriver
-          sudo apt-get update && sudo apt-get install -y xvfb x11vnc xdotool fluxbox novnc websockify
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc xdotool fluxbox novnc websockify
 
       - name: 4. 按需拉起 Sing-Box 代理
         if: env.PROXY_STR != ''
@@ -54,7 +60,7 @@ jobs:
         run: |
           mkdir -p ~/.chrome-profile-agentrouter
 
-          # 下载 cloudflared（不需要账号，直接生成临时隧道）
+          # 下载 cloudflared（临时隧道，无需账号）
           curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
             -o /usr/local/bin/cloudflared
           chmod +x /usr/local/bin/cloudflared
@@ -76,7 +82,7 @@ jobs:
           websockify --web /usr/share/novnc 6080 localhost:5900 &
           sleep 2
 
-          # 启动 cloudflared 临时隧道，穿透 6080（无需账号）
+          # 启动 cloudflared 临时隧道，穿透 6080
           nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cf.log 2>&1 &
           sleep 8
 
@@ -87,9 +93,10 @@ jobs:
           echo "╔══════════════════════════════════════════════════════════════╗"
           echo "║  🌐 浏览器直接打开下面的链接即可远程操控 Chrome！          ║"
           echo "║                                                              ║"
-          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
+          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true" 
           echo "║                                                              ║"
-          echo "║  无需安装任何客户端，无需密码，直接在浏览器里操作          ║"
+          echo "║  提示：登录 GitHub / AgentRouter 后不要手动结束 Job          ║"
+          echo "║  等待倒计时结束，系统会保存 Profile 到缓存                   ║"
           echo "╚══════════════════════════════════════════════════════════════╝"
 
           # 构造 Chrome 启动参数
@@ -98,20 +105,21 @@ jobs:
             --no-default-browser-check \
             --disable-session-crashed-bubble \
             --disable-dev-shm-usage \
-            --no-sandbox"
+            --no-sandbox \
+            --window-size=1280,800"
 
           if [ -n "$PROXY_STR" ]; then
             CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
           fi
 
-          # 打开 Chrome，直接到 AgentRouter 登录页
+          # 打开 Chrome：先到 github.com 确认账号，再到登录页
+          google-chrome $CHROME_ARGS https://github.com &
+          sleep 2
           google-chrome $CHROME_ARGS https://agentrouter.org/login &
 
           echo ""
-          echo "⏳ 等待 5 分钟供手动操作..."
-          echo "   请在浏览器里完成 GitHub OAuth 登录，看到 /console 页面后"
-          echo "   不需要做其他操作，等待 Job 自动完成即可。"
-          sleep 300
+          echo "⏳ 等待 6 分钟供手动操作..."
+          sleep 360
 
       - name: 6. 保存 Chrome Profile 到 Actions Cache
         uses: actions/cache/save@v4
@@ -120,9 +128,9 @@ jobs:
           key: chrome-profile-agentrouter-v1
 
 
-# ─────────────────────────────────────────────────────────────
-# JOB 2：每日自动签到
-# ─────────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2：每日自动签到
+  # ─────────────────────────────────────────────────────────────
   run-daily-checkin:
     name: ✅ 每日自动签到
     runs-on: ubuntu-latest
@@ -150,7 +158,6 @@ jobs:
         with:
           path: ~/.chrome-profile-agentrouter
           key: chrome-profile-agentrouter-v1
-          # 即使 cache miss 也不报错，脚本会回退到 GH_COOKIE 注入
           fail-on-cache-miss: false
 
       - name: 6. 按需下载并配置 Sing-Box 代理
@@ -169,7 +176,6 @@ jobs:
 
       - name: 7. 执行签到脚本
         env:
-          GH_COOKIE: ${{ secrets.GH_COOKIE }}
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -182,11 +188,3 @@ jobs:
             echo "未配置代理，使用原生 IP 直接访问"
           fi
           xvfb-run --auto-servernum python main.py
-
-      - name: 8. 回写更新后的 Chrome Profile 到缓存
-        uses: actions/cache/save@v4
-        # 无论签到成功失败都保存，确保 session 保持最新
-        if: always()
-        with:
-          path: ~/.chrome-profile-agentrouter
-          key: chrome-profile-agentrouter-v1
