@@ -29,6 +29,10 @@ TG_CHAT_ID = ""
 TG_TOKEN = ""
 TG_PROXY = ""
 
+# ✅ 全局页面加载超时（秒），防止代理不通时页面无限挂起
+PAGE_LOAD_TIMEOUT = 20
+SCRIPT_TIMEOUT = 15
+
 
 def log(message: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
@@ -70,7 +74,8 @@ def refresh_config() -> None:
     LOGIN_TEXT = (os.environ.get("AGENTROUTER_LOGIN_TEXT") or "使用 GitHub 继续").strip()
     WAIT_AFTER_CLICK = float((os.environ.get("AGENTROUTER_WAIT_AFTER_CLICK") or "90").strip() or "90")
     READY_WAIT = float((os.environ.get("AGENTROUTER_READY_WAIT") or "2").strip() or "2")
-    USE_UC = (os.environ.get("AGENTROUTER_USE_UC") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    # ✅ USE_UC 默认 False，不从环境变量读取，避免误开启
+    USE_UC = False
     TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or os.environ.get("CHAT_ID") or "").strip()
     TG_TOKEN = (
         os.environ.get("TG_BOT_TOKEN")
@@ -250,9 +255,8 @@ def build_sb_args() -> dict:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     locale = (os.environ.get("BROWSER_LOCALE") or "").strip()
 
+    # ✅ USE_UC 已锁定为 False，此处不再传入 uc=True
     args = {"test": True, "headed": True}
-    if USE_UC:
-        args["uc"] = True
     if chrome_path:
         args["binary_location"] = chrome_path
     if user_data_dir:
@@ -440,7 +444,6 @@ def webdriver_click_github_login(sb: SB) -> None:
     )
     if not element:
         raise RuntimeError("GitHub login control not found for WebDriver click")
-    # 使用 JS 强制点击，无视上方遮挡物和 loading 状态
     sb.driver.execute_script("arguments[0].click();", element)
 
 
@@ -463,13 +466,13 @@ def click_github_login(sb: SB) -> None:
         subprocess.run(["xdotool", "mousemove", x, y], check=True, timeout=5)
         time.sleep(0.15)
         subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-        
-        # 强制兜底：xvfb 虚拟屏幕可能导致 xdotool 坐标漂移点击落空。如果没跳走，补一刀！
+
+        # 兜底：xvfb 虚拟屏幕可能导致 xdotool 坐标漂移，补一刀
         time.sleep(1.5)
         if "login" in current_url_safe(sb):
             log("xdotool 似乎未生效，强制启用 webdriver 兜底点击...")
             webdriver_click_github_login(sb)
-            
+
         return
     except Exception as exc:
         log(f"xdotool GitHub click failed, fallback to WebDriver click: {exc}")
@@ -490,7 +493,7 @@ def page_text_sample(sb: SB, limit: int = 5000) -> str:
 
 
 def parse_money_text(text: str) -> float | None:
-    match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", str(text or ""))
+    match = re.search(r"\$\s*(+(?:\.+)?)", str(text or ""))
     if not match:
         return None
     try:
@@ -507,7 +510,7 @@ def read_balance_from_page(sb: SB) -> dict:
             const text = norm(document.body && (document.body.innerText || document.body.textContent || ''));
             const labelIndex = text.indexOf('当前余额');
             const sample = labelIndex >= 0 ? text.slice(labelIndex, labelIndex + 120) : text.slice(0, 500);
-            const match = sample.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/) || text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+            const match = sample.match(/\$\s*(+(?:\.+)?)/) || text.match(/\$\s*(+(?:\.+)?)/);
             return { balanceText: match ? match[0] : '', balanceAmount: match ? match[1] : '', sample };
             """
         )
@@ -614,6 +617,64 @@ def compute_result(data: dict) -> bool:
     return False
 
 
+# ✅ 新增：代理连通性预检，失败立即抛出异常终止任务
+def check_proxy_connectivity(sb: SB) -> None:
+    proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
+    if not proxy:
+        log("未配置 BROWSER_PROXY，跳过代理预检")
+        return
+    log(f"代理预检中: {proxy}")
+    try:
+        sb.driver.set_page_load_timeout(10)
+        sb.open("https://api.ipify.org")
+        ip_text = page_text_sample(sb, 50).strip()
+        if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip_text):
+            parts = ip_text.split(".")
+            masked = f"***.***.{parts[2]}.{parts[3]}"
+            log(f"【代理检查】出口 IP: {masked} ✅ 代理连通正常")
+        else:
+            raise RuntimeError(f"ipify 响应异常: {ip_text!r}")
+    except Exception as exc:
+        raise RuntimeError(f"代理节点不可达，终止任务防止浏览器挂死: {exc}") from exc
+    finally:
+        # ✅ 恢复全局超时设置
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+
+
+# ✅ 新增：GH_COOKIE 注入带超时保护，失败时跳过而不是挂死
+def inject_github_cookie(sb: SB) -> None:
+    gh_cookie = (os.environ.get("GH_COOKIE") or "").strip()
+    if not gh_cookie:
+        return
+    log("检测到环境变量 GH_COOKIE，开始执行身份注入...")
+    try:
+        sb.driver.set_page_load_timeout(15)
+        sb.open("https://github.com/404")
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+    except Exception as exc:
+        log(f"⚠️  GitHub 页面加载超时/失败（代理可能不通），跳过 Cookie 注入: {exc}")
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        return
+
+    sb.driver.add_cookie({
+        "name": "user_session",
+        "value": gh_cookie,
+        "domain": "github.com",
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+    })
+    sb.driver.add_cookie({
+        "name": "__Host-user_session_same_site",
+        "value": gh_cookie,
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Strict",
+    })
+    log("GitHub 尊贵身份注入完成！")
+
+
 def main() -> None:
     user_loaded = load_env_file(USER_ENV_FILE)
     env_file_from_var = (os.environ.get("AGENTROUTER_ENV_FILE") or "").strip()
@@ -645,44 +706,18 @@ def main() -> None:
 
         with SB(**build_sb_args()) as sb:
             log("browser started")
+
+            # ✅ 启动后立即设置全局超时，防止任何页面挂死
+            sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+            sb.driver.set_script_timeout(SCRIPT_TIMEOUT)
+
             dismiss_chrome_crash_prompt()
 
-            # ========== 开始注入你的 Github 免死金牌 ==========
-            gh_cookie = (os.environ.get("GH_COOKIE") or "").strip()
-            if gh_cookie:
-                log("检测到环境变量 GH_COOKIE，开始执行身份注入...")
-                # 访问 github 404 页面以便写入 cookie
-                sb.open("https://github.com/404")
-                time.sleep(1)
-                
-                # 分别注入，严格遵守 __Host- Cookie 的安全规范 (不能带 domain 参数)
-                sb.driver.add_cookie({
-                    "name": "user_session",
-                    "value": gh_cookie,
-                    "domain": "github.com",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True
-                })
-                sb.driver.add_cookie({
-                    "name": "__Host-user_session_same_site",
-                    "value": gh_cookie,
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                    "sameSite": "Strict"
-                })
-                log("Github 尊贵身份注入完成！")
-            
-            try:
-                sb.open("https://api.ipify.org")
-                ip_text = page_text_sample(sb, 50).strip()
-                # 打码 IP 前两段，保护节点隐私 (例如 192.168.1.1 变成 ***.***.1.1)
-                masked_ip = "***.***." + ".".join(ip_text.split(".")[-2:]) if "." in ip_text else "隐匿 IP"
-                log(f"【代理检查】浏览器真实出口 IP: {masked_ip}")
-            except Exception as e:
-                log(f"【代理检查】获取 IP 失败: {e}")
-            # ==================================================
+            # ✅ 代理预检（配置了代理才执行），不通直接抛异常终止
+            check_proxy_connectivity(sb)
+
+            # ✅ GH_COOKIE 注入（带 15s 超时保护，失败跳过不崩溃）
+            inject_github_cookie(sb)
 
             open_url(sb, SITE_URL, "site")
 
