@@ -31,8 +31,6 @@ TG_PROXY = ""
 
 PAGE_LOAD_TIMEOUT = 20
 SCRIPT_TIMEOUT = 15
-
-# 调试截图推送间隔（秒），等待登录期间每隔此时间推一张截图
 DEBUG_SCREENSHOT_INTERVAL = 15
 
 
@@ -76,7 +74,7 @@ def refresh_config() -> None:
     LOGIN_TEXT = (os.environ.get("AGENTROUTER_LOGIN_TEXT") or "使用 GitHub 继续").strip()
     WAIT_AFTER_CLICK = float((os.environ.get("AGENTROUTER_WAIT_AFTER_CLICK") or "90").strip() or "90")
     READY_WAIT = float((os.environ.get("AGENTROUTER_READY_WAIT") or "2").strip() or "2")
-    USE_UC = False  # 硬锁，不从环境变量读取
+    USE_UC = False
     TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or os.environ.get("CHAT_ID") or "").strip()
     TG_TOKEN = (
         os.environ.get("TG_BOT_TOKEN")
@@ -108,7 +106,7 @@ def is_target_host(url: str) -> bool:
     return bool(host and target_host and (host == target_host or host.endswith("." + target_host)))
 
 
-def current_url_safe(sb: SB) -> str:
+def current_url_safe(sb) -> str:
     try:
         return sb.get_current_url() or ""
     except Exception as exc:
@@ -124,7 +122,7 @@ def normalize_socks_proxy(proxy: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# TG 文字推送
+# TG 推送
 # ─────────────────────────────────────────────
 
 def send_tg_message_via_curl(text: str) -> bool:
@@ -179,12 +177,7 @@ def send_tg_message(text: str) -> None:
         log(f"TG text push failed: {exc}")
 
 
-# ─────────────────────────────────────────────
-# ✅ 新增：截图推送到 TG（sendPhoto）
-# ─────────────────────────────────────────────
-
 def send_tg_photo(image_path: str, caption: str = "") -> None:
-    """把本地截图文件以 sendPhoto 方式推送到 TG。"""
     if not TG_TOKEN or not TG_CHAT_ID:
         log("TG not configured, skipping photo push")
         return
@@ -192,7 +185,6 @@ def send_tg_photo(image_path: str, caption: str = "") -> None:
         log(f"screenshot file not found, skipping photo push: {image_path}")
         return
     log(f"TG photo push: {image_path}")
-    # 优先走 curl（支持 socks 代理）
     proxy = normalize_socks_proxy(TG_PROXY) if TG_PROXY else ""
     curl_cmd = ["curl", "-sS", "--max-time", "40"]
     if proxy:
@@ -214,47 +206,9 @@ def send_tg_photo(image_path: str, caption: str = "") -> None:
         log(f"TG photo curl not ok: {body[:200]}")
     except Exception as exc:
         log(f"TG photo curl failed: {exc}")
-    # 回退：urllib multipart
-    try:
-        boundary = "----SBDebugBoundary"
-        img_data = Path(image_path).read_bytes()
-        body_parts = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-            f"{TG_CHAT_ID}\r\n"
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="photo"; filename="debug.png"\r\n'
-            f"Content-Type: image/png\r\n\r\n"
-        ).encode("utf-8") + img_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
-        if caption:
-            cap_part = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="caption"\r\n\r\n'
-                f"{caption[:1000]}\r\n"
-            ).encode("utf-8")
-            body_parts = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-                f"{TG_CHAT_ID}\r\n"
-            ).encode("utf-8") + cap_part + (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="photo"; filename="debug.png"\r\n'
-                f"Content-Type: image/png\r\n\r\n"
-            ).encode("utf-8") + img_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
-            data=body_parts, method="POST",
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        )
-        with urllib.request.urlopen(req, timeout=40) as resp:
-            resp.read()
-        log("TG photo push sent via urllib")
-    except Exception as exc:
-        log(f"TG photo push (urllib) failed: {exc}")
 
 
-def debug_screenshot_and_push(sb: SB, label: str) -> str | None:
-    """截图 → 保存到临时文件 → 推送到 TG，返回文件路径。"""
+def debug_screenshot_and_push(sb, label: str) -> str | None:
     ts = datetime.now().strftime("%H%M%S")
     tmp_path = f"/tmp/debug_{ts}_{label.replace(' ', '_')}.png"
     try:
@@ -308,7 +262,7 @@ def write_result(ok: bool, error: str | None = None, data: dict | None = None, s
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def save_screenshot(sb: SB, path: str | None = None) -> str | None:
+def save_screenshot(sb, path: str | None = None) -> str | None:
     shot = path or TASK_SCREENSHOT_PATH
     if not shot:
         return None
@@ -340,7 +294,7 @@ def build_sb_args() -> dict:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     locale = (os.environ.get("BROWSER_LOCALE") or "").strip()
 
-    args = {"test": True, "headed": True}  # USE_UC 已硬锁为 False
+    args = {"test": True, "headed": True}
     if chrome_path:
         args["binary_location"] = chrome_path
     if user_data_dir:
@@ -422,14 +376,14 @@ def dismiss_chrome_crash_prompt() -> None:
 # 页面操作工具
 # ─────────────────────────────────────────────
 
-def open_url(sb: SB, url: str, label: str) -> None:
+def open_url(sb, url: str, label: str) -> None:
     log(f"open {label}: {url}")
     sb.open(url)
     time.sleep(READY_WAIT)
     log(f"{label} URL: {current_url_safe(sb)}")
 
 
-def browser_fetch_json(sb: SB, path: str, timeout: int = 15) -> dict:
+def browser_fetch_json(sb, path: str, timeout: int = 15) -> dict:
     sb.driver.set_script_timeout(timeout)
     return sb.driver.execute_async_script(
         """
@@ -458,7 +412,7 @@ def is_waf_text(text: str) -> bool:
     return "CF_APP_WAF" in value or "为了更好的访问体验，请进行验证" in value or "AliyunCaptcha" in value
 
 
-def logout_via_api(sb: SB) -> None:
+def logout_via_api(sb) -> None:
     if not is_target_host(current_url_safe(sb)):
         open_url(sb, SITE_URL, "site before logout")
     result = browser_fetch_json(sb, "/api/user/logout")
@@ -469,7 +423,7 @@ def logout_via_api(sb: SB) -> None:
     time.sleep(1)
 
 
-def locate_github_login_control(sb: SB) -> dict:
+def locate_github_login_control(sb) -> dict:
     result = sb.driver.execute_script(
         r"""
         const loginText = arguments[0];
@@ -523,7 +477,7 @@ def locate_github_login_control(sb: SB) -> dict:
     return result if isinstance(result, dict) else {"found": False, "raw": result}
 
 
-def webdriver_click_github_login(sb: SB) -> None:
+def webdriver_click_github_login(sb) -> None:
     element = sb.driver.execute_script(
         r"""
         const loginText = arguments[0];
@@ -539,7 +493,7 @@ def webdriver_click_github_login(sb: SB) -> None:
     sb.driver.execute_script("arguments[0].click();", element)
 
 
-def click_github_login(sb: SB) -> None:
+def click_github_login(sb) -> None:
     deadline = time.time() + 20
     last_result = None
     while time.time() < deadline:
@@ -558,7 +512,6 @@ def click_github_login(sb: SB) -> None:
         subprocess.run(["xdotool", "mousemove", x, y], check=True, timeout=5)
         time.sleep(0.15)
         subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-
         time.sleep(1.5)
         if "login" in current_url_safe(sb):
             log("xdotool 似乎未生效，强制启用 webdriver 兜底点击...")
@@ -569,7 +522,7 @@ def click_github_login(sb: SB) -> None:
     webdriver_click_github_login(sb)
 
 
-def page_text_sample(sb: SB, limit: int = 5000) -> str:
+def page_text_sample(sb, limit: int = 5000) -> str:
     try:
         return str(
             sb.driver.execute_script(
@@ -592,7 +545,7 @@ def parse_money_text(text: str) -> float | None:
         return None
 
 
-def read_balance_from_page(sb: SB) -> dict:
+def read_balance_from_page(sb) -> dict:
     try:
         payload = sb.driver.execute_script(
             r"""
@@ -611,7 +564,7 @@ def read_balance_from_page(sb: SB) -> dict:
     return {"balanceText": "", "balanceAmount": "", "sample": ""}
 
 
-def open_wallet_and_read_balance(sb: SB) -> dict:
+def open_wallet_and_read_balance(sb) -> dict:
     open_url(sb, WALLET_URL, "wallet")
     deadline = time.time() + 25
     last_url = ""
@@ -631,12 +584,12 @@ def open_wallet_and_read_balance(sb: SB) -> dict:
     return {"loggedIn": is_logged_in_by_url(sb), "balanceText": "", "balanceAmount": ""}
 
 
-def is_logged_in_by_url(sb: SB) -> bool:
+def is_logged_in_by_url(sb) -> bool:
     url = current_url_safe(sb)
     return is_target_host(url) and path_from_url(url).startswith("/console")
 
 
-def switch_to_best_target_tab(sb: SB) -> None:
+def switch_to_best_target_tab(sb) -> None:
     try:
         handles = list(sb.driver.window_handles)
     except Exception:
@@ -667,14 +620,12 @@ def switch_to_best_target_tab(sb: SB) -> None:
             pass
 
 
-def wait_for_login_success(sb: SB) -> None:
-    """等待登录完成，期间每隔 DEBUG_SCREENSHOT_INTERVAL 秒截图推送到 TG。"""
+def wait_for_login_success(sb) -> None:
     deadline = time.time() + WAIT_AFTER_CLICK
     last_url = ""
     last_screenshot_at = time.time()
     screenshot_index = 0
 
-    # ✅ 点击后立即拍第一张，看按钮点击是否触发了跳转
     debug_screenshot_and_push(sb, f"after_click_{screenshot_index:02d}")
     screenshot_index += 1
 
@@ -682,7 +633,6 @@ def wait_for_login_success(sb: SB) -> None:
         switch_to_best_target_tab(sb)
         url = current_url_safe(sb)
 
-        # URL 发生变化时立即截图
         if url != last_url:
             log(f"waiting login URL: {url}")
             last_url = url
@@ -697,7 +647,6 @@ def wait_for_login_success(sb: SB) -> None:
             debug_screenshot_and_push(sb, f"waf_detected_{screenshot_index:02d}")
             raise RuntimeError("login flow hit WAF verification page")
 
-        # 定时截图（每 DEBUG_SCREENSHOT_INTERVAL 秒）
         if time.time() - last_screenshot_at >= DEBUG_SCREENSHOT_INTERVAL:
             debug_screenshot_and_push(sb, f"heartbeat_{screenshot_index:02d}")
             screenshot_index += 1
@@ -705,7 +654,6 @@ def wait_for_login_success(sb: SB) -> None:
 
         time.sleep(1)
 
-    # 超时前最后一张
     debug_screenshot_and_push(sb, f"timeout_{screenshot_index:02d}")
     raise RuntimeError(f"timed out waiting for login success; current={current_url_safe(sb)}")
 
@@ -733,42 +681,10 @@ def compute_result(data: dict) -> bool:
 
 
 # ─────────────────────────────────────────────
-# 代理预检 & Cookie 注入
+# 代理预检
 # ─────────────────────────────────────────────
 
-def check_github_login_status(sb: SB) -> None:
-    """打开 github.com 截图推送到 TG，直观确认 GitHub 登录状态。"""
-    log("检查 GitHub 登录状态...")
-    try:
-        sb.driver.set_page_load_timeout(15)
-        sb.open("https://github.com")
-        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
-        time.sleep(2)
-
-        # 用 JS 读取登录状态
-        login_info = sb.driver.execute_script("""
-            const meta = document.querySelector('meta[name="user-login"]');
-            const avatar = document.querySelector('.avatar-user, [data-login]');
-            return {
-                userLogin: meta ? meta.getAttribute('content') : null,
-                hasAvatar: !!avatar,
-                title: document.title
-            };
-        """)
-        if isinstance(login_info, dict) and login_info.get("userLogin"):
-            msg = f"✅ GitHub 已登录: @{login_info['userLogin']}"
-        else:
-            msg = f"❌ GitHub 未登录 (title={login_info.get('title') if isinstance(login_info, dict) else '?'})"
-        log(msg)
-        debug_screenshot_and_push(sb, f"github_status")
-        send_tg_message(f"🔍 GitHub 登录状态检查\n{msg}")
-    except Exception as exc:
-        log(f"GitHub 状态检查失败: {exc}")
-    finally:
-        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
-
-
-
+def check_proxy_connectivity(sb) -> None:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     if not proxy:
         log("未配置 BROWSER_PROXY，跳过代理预检")
@@ -790,27 +706,60 @@ def check_github_login_status(sb: SB) -> None:
         sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
 
 
-def inject_github_cookie(sb: SB) -> None:
+# ─────────────────────────────────────────────
+# GitHub 登录状态检查（截图推 TG）
+# ─────────────────────────────────────────────
+
+def check_github_login_status(sb) -> None:
+    """打开 github.com 截图，直观确认 Profile 里的 GitHub 登录状态。"""
+    log("检查 GitHub 登录状态...")
+    try:
+        sb.driver.set_page_load_timeout(15)
+        sb.open("https://github.com")
+        time.sleep(2)
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        login_info = sb.driver.execute_script("""
+            const meta = document.querySelector('meta[name="user-login"]');
+            const avatar = document.querySelector('.avatar-user, [data-login]');
+            return {
+                userLogin: meta ? meta.getAttribute('content') : null,
+                hasAvatar: !!avatar,
+                title: document.title
+            };
+        """)
+        if isinstance(login_info, dict) and login_info.get("userLogin"):
+            msg = f"✅ GitHub 已登录: @{login_info['userLogin']}"
+        else:
+            msg = f"❌ GitHub 未登录 (title={login_info.get('title') if isinstance(login_info, dict) else '?'})"
+        log(msg)
+        debug_screenshot_and_push(sb, "github_status")
+        send_tg_message(f"🔍 GitHub 登录状态\n{msg}")
+    except Exception as exc:
+        log(f"GitHub 状态检查失败: {exc}")
+        sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+
+
+# ─────────────────────────────────────────────
+# GH_COOKIE 注入（Profile 优先，无 Profile 时兜底）
+# ─────────────────────────────────────────────
+
+def inject_github_cookie(sb) -> None:
     gh_cookie = (os.environ.get("GH_COOKIE") or "").strip()
     if not gh_cookie:
         return
-
-    # ✅ 有 Chrome Profile 时跳过注入：Profile 里已有登录态，注入反而可能干扰
     profile_dir = (os.environ.get("BROWSER_USER_DATA_DIR") or "").strip()
     if profile_dir and Path(profile_dir).exists():
         log(f"检测到 Chrome Profile 目录，跳过 GH_COOKIE 注入（Profile 优先）: {profile_dir}")
         return
-
     log("未检测到 Chrome Profile，使用 GH_COOKIE 注入...")
     try:
         sb.driver.set_page_load_timeout(15)
         sb.open("https://github.com/404")
         sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     except Exception as exc:
-        log(f"⚠️  GitHub 页面加载超时/失败（代理可能不通），跳过 Cookie 注入: {exc}")
+        log(f"⚠️  GitHub 页面加载超时/失败，跳过 Cookie 注入: {exc}")
         sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
         return
-
     sb.driver.add_cookie({
         "name": "user_session",
         "value": gh_cookie,
@@ -865,8 +814,6 @@ def main() -> None:
 
         with SB(**build_sb_args()) as sb:
             log("browser started")
-
-            # 全局超时保护
             sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
             sb.driver.set_script_timeout(SCRIPT_TIMEOUT)
 
@@ -875,11 +822,11 @@ def main() -> None:
             # 代理预检
             check_proxy_connectivity(sb)
 
-            # GH_COOKIE 注入（带超时保护）
-            inject_github_cookie(sb)
-
-            # ✅ 启动后先去 github.com 截图，直接确认 GitHub 登录状态
+            # ✅ 启动后第一件事：去 github.com 截图确认登录状态
             check_github_login_status(sb)
+
+            # GH_COOKIE 注入（有 Profile 时跳过）
+            inject_github_cookie(sb)
 
             open_url(sb, SITE_URL, "site")
 
@@ -894,8 +841,6 @@ def main() -> None:
                 log("session appears logged out")
 
             open_url(sb, LOGIN_URL, "login")
-
-            # ✅ 打开登录页后截图，确认页面是否正常渲染
             debug_screenshot_and_push(sb, "login_page_loaded")
 
             if is_logged_in_by_url(sb):
@@ -904,8 +849,6 @@ def main() -> None:
                 open_url(sb, LOGIN_URL, "login after forced logout")
 
             click_github_login(sb)
-
-            # wait_for_login_success 内部会自动截图推送
             wait_for_login_success(sb)
 
             after_balance = open_wallet_and_read_balance(sb)
