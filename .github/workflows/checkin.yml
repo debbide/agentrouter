@@ -53,6 +53,8 @@ jobs:
         env:
           GH_COOKIE: ${{ secrets.GH_COOKIE }}
           PROXY_STR: ${{ secrets.PROXY_STR }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           # 动态决定是否喂代理环境变量
         run: |
           if [ -n "$PROXY_STR" ]; then
