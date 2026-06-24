@@ -647,16 +647,23 @@ def main() -> None:
                 sb.open("https://github.com/404")
                 time.sleep(1)
                 
-                # 暴力注入
-                for cookie_name in ["user_session", "__Host-user_session_same_site"]:
-                    sb.driver.add_cookie({
-                        "name": cookie_name,
-                        "value": gh_cookie,
-                        "domain": ".github.com",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True
-                    })
+                # 分别注入，严格遵守 __Host- Cookie 的安全规范 (不能带 domain 参数)
+                sb.driver.add_cookie({
+                    "name": "user_session",
+                    "value": gh_cookie,
+                    "domain": "github.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True
+                })
+                sb.driver.add_cookie({
+                    "name": "__Host-user_session_same_site",
+                    "value": gh_cookie,
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "Strict"
+                })
                 log("Github 尊贵身份注入完成！")
             # ==================================================
 
