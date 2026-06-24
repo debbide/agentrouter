@@ -440,7 +440,8 @@ def webdriver_click_github_login(sb: SB) -> None:
     )
     if not element:
         raise RuntimeError("GitHub login control not found for WebDriver click")
-    element.click()
+    # 使用 JS 强制点击，无视上方遮挡物和 loading 状态
+    sb.driver.execute_script("arguments[0].click();", element)
 
 
 def click_github_login(sb: SB) -> None:

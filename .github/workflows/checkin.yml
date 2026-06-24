@@ -55,6 +55,7 @@ jobs:
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          AGENTROUTER_USE_UC: 1
           # 动态决定是否喂代理环境变量
         run: |
           if [ -n "$PROXY_STR" ]; then
