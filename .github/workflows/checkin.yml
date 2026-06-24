@@ -46,8 +46,8 @@ jobs:
           # 等待隧道连通
           sleep 3
           
-          # 验证代理端口是否启动
-          curl -sS --socks5 127.0.0.1:8080 https://api.ipify.org || echo "代理可能未就绪，继续执行"
+          # 验证代理端口是否启动 (为保护节点隐私，不打印具体 IP)
+          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！" https://api.ipify.org || echo "代理可能未就绪，继续执行"
 
       - name: 6. 执行签到脚本
         env:
