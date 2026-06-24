@@ -88,12 +88,11 @@ jobs:
 
           # 从日志里提取 trycloudflare.com 地址
           CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1)
-
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
           echo "║  🌐 浏览器直接打开下面的链接即可远程操控 Chrome！          ║"
           echo "║                                                              ║"
-          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true" 
+          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
           echo "║                                                              ║"
           echo "║  提示：登录 GitHub / AgentRouter 后不要手动结束 Job          ║"
           echo "║  等待倒计时结束，系统会保存 Profile 到缓存                   ║"
@@ -112,20 +111,27 @@ jobs:
             CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
           fi
 
-          # 打开 Chrome：先到 github.com 确认账号，再到登录页
-          google-chrome $CHROME_ARGS https://github.com &
-          sleep 2
-          google-chrome $CHROME_ARGS https://agentrouter.org/login &
+          # 单实例打开多 Tab，避免 user-data-dir 锁文件冲突
+          google-chrome $CHROME_ARGS \
+            --new-window https://github.com \
+            https://agentrouter.org/login &
 
           echo ""
           echo "⏳ 等待 6 分钟供手动操作..."
           sleep 360
 
-      - name: 6. 保存 Chrome Profile 到 Actions Cache
+      - name: 6. 删除旧 Cache（避免 Key 冲突）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache delete chrome-profile-agentrouter-v1 \
+            --repo ${{ github.repository }} || true
+
+      - name: 7. 保存 Chrome Profile 到 Actions Cache
         uses: actions/cache/save@v4
         with:
           path: ~/.chrome-profile-agentrouter
-          key: chrome-profile-agentrouter-v1
+          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
 
 
   # ─────────────────────────────────────────────────────────────
@@ -157,7 +163,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.chrome-profile-agentrouter
-          key: chrome-profile-agentrouter-v1
+          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
+          restore-keys: |
+            chrome-profile-agentrouter-v1-
           fail-on-cache-miss: false
 
       - name: 6. 按需下载并配置 Sing-Box 代理
@@ -188,3 +196,10 @@ jobs:
             echo "未配置代理，使用原生 IP 直接访问"
           fi
           xvfb-run --auto-servernum python main.py
+
+      - name: 8. 保存更新后的 Chrome Profile
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
