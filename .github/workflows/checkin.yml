@@ -120,14 +120,7 @@ jobs:
           echo "⏳ 等待 6 分钟供手动操作..."
           sleep 360
 
-      - name: 6. 删除旧 Cache（避免 Key 冲突）
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh cache delete chrome-profile-agentrouter-v1 \
-            --repo ${{ github.repository }} || true
-
-      - name: 7. 保存 Chrome Profile 到 Actions Cache
+      - name: 6. 保存 Chrome Profile 到 Actions Cache
         uses: actions/cache/save@v4
         with:
           path: ~/.chrome-profile-agentrouter
