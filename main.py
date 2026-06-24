@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-05-26-dom-login-no-api-poll"
+SCRIPT_REVISION = "2026-06-24-debug-screenshot"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -29,9 +29,11 @@ TG_CHAT_ID = ""
 TG_TOKEN = ""
 TG_PROXY = ""
 
-# ✅ 全局页面加载超时（秒），防止代理不通时页面无限挂起
 PAGE_LOAD_TIMEOUT = 20
 SCRIPT_TIMEOUT = 15
+
+# 调试截图推送间隔（秒），等待登录期间每隔此时间推一张截图
+DEBUG_SCREENSHOT_INTERVAL = 15
 
 
 def log(message: str) -> None:
@@ -74,8 +76,7 @@ def refresh_config() -> None:
     LOGIN_TEXT = (os.environ.get("AGENTROUTER_LOGIN_TEXT") or "使用 GitHub 继续").strip()
     WAIT_AFTER_CLICK = float((os.environ.get("AGENTROUTER_WAIT_AFTER_CLICK") or "90").strip() or "90")
     READY_WAIT = float((os.environ.get("AGENTROUTER_READY_WAIT") or "2").strip() or "2")
-    # ✅ USE_UC 默认 False，不从环境变量读取，避免误开启
-    USE_UC = False
+    USE_UC = False  # 硬锁，不从环境变量读取
     TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or os.environ.get("CHAT_ID") or "").strip()
     TG_TOKEN = (
         os.environ.get("TG_BOT_TOKEN")
@@ -122,6 +123,10 @@ def normalize_socks_proxy(proxy: str) -> str:
     return value
 
 
+# ─────────────────────────────────────────────
+# TG 文字推送
+# ─────────────────────────────────────────────
+
 def send_tg_message_via_curl(text: str) -> bool:
     if not TG_PROXY:
         return False
@@ -129,21 +134,13 @@ def send_tg_message_via_curl(text: str) -> bool:
     if not proxy:
         return False
     cmd = [
-        "curl",
-        "-sS",
-        "--max-time",
-        "25",
-        "--socks5-hostname",
-        proxy,
-        "-X",
-        "POST",
+        "curl", "-sS", "--max-time", "25",
+        "--socks5-hostname", proxy,
+        "-X", "POST",
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-        "--data-urlencode",
-        f"chat_id={TG_CHAT_ID}",
-        "--data-urlencode",
-        f"text={text}",
-        "--data-urlencode",
-        "disable_web_page_preview=true",
+        "--data-urlencode", f"chat_id={TG_CHAT_ID}",
+        "--data-urlencode", f"text={text}",
+        "--data-urlencode", "disable_web_page_preview=true",
     ]
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
@@ -168,16 +165,11 @@ def send_tg_message(text: str) -> None:
         return
     try:
         payload = urllib.parse.urlencode(
-            {
-                "chat_id": TG_CHAT_ID,
-                "text": message,
-                "disable_web_page_preview": "true",
-            }
+            {"chat_id": TG_CHAT_ID, "text": message, "disable_web_page_preview": "true"}
         ).encode("utf-8")
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data=payload,
-            method="POST",
+            data=payload, method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
@@ -187,26 +179,115 @@ def send_tg_message(text: str) -> None:
         log(f"TG text push failed: {exc}")
 
 
+# ─────────────────────────────────────────────
+# ✅ 新增：截图推送到 TG（sendPhoto）
+# ─────────────────────────────────────────────
+
+def send_tg_photo(image_path: str, caption: str = "") -> None:
+    """把本地截图文件以 sendPhoto 方式推送到 TG。"""
+    if not TG_TOKEN or not TG_CHAT_ID:
+        log("TG not configured, skipping photo push")
+        return
+    if not image_path or not Path(image_path).exists():
+        log(f"screenshot file not found, skipping photo push: {image_path}")
+        return
+    log(f"TG photo push: {image_path}")
+    # 优先走 curl（支持 socks 代理）
+    proxy = normalize_socks_proxy(TG_PROXY) if TG_PROXY else ""
+    curl_cmd = ["curl", "-sS", "--max-time", "40"]
+    if proxy:
+        curl_cmd += ["--socks5-hostname", proxy]
+    curl_cmd += [
+        "-X", "POST",
+        f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+        "-F", f"chat_id={TG_CHAT_ID}",
+        "-F", f"photo=@{image_path}",
+    ]
+    if caption:
+        curl_cmd += ["-F", f"caption={caption[:1000]}"]
+    try:
+        proc = subprocess.run(curl_cmd, check=True, capture_output=True, text=True, timeout=45)
+        body = (proc.stdout or "").strip()
+        if '"ok":true' in body.replace(" ", ""):
+            log("TG photo push sent via curl")
+            return
+        log(f"TG photo curl not ok: {body[:200]}")
+    except Exception as exc:
+        log(f"TG photo curl failed: {exc}")
+    # 回退：urllib multipart
+    try:
+        boundary = "----SBDebugBoundary"
+        img_data = Path(image_path).read_bytes()
+        body_parts = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+            f"{TG_CHAT_ID}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="photo"; filename="debug.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode("utf-8") + img_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        if caption:
+            cap_part = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+                f"{caption[:1000]}\r\n"
+            ).encode("utf-8")
+            body_parts = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                f"{TG_CHAT_ID}\r\n"
+            ).encode("utf-8") + cap_part + (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="photo"; filename="debug.png"\r\n'
+                f"Content-Type: image/png\r\n\r\n"
+            ).encode("utf-8") + img_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+            data=body_parts, method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            resp.read()
+        log("TG photo push sent via urllib")
+    except Exception as exc:
+        log(f"TG photo push (urllib) failed: {exc}")
+
+
+def debug_screenshot_and_push(sb: SB, label: str) -> str | None:
+    """截图 → 保存到临时文件 → 推送到 TG，返回文件路径。"""
+    ts = datetime.now().strftime("%H%M%S")
+    tmp_path = f"/tmp/debug_{ts}_{label.replace(' ', '_')}.png"
+    try:
+        sb.save_screenshot(tmp_path)
+        log(f"调试截图已保存: {tmp_path}")
+    except Exception as exc:
+        log(f"调试截图保存失败: {exc}")
+        return None
+    caption = f"🔍 [{label}]\n🕒 {datetime.now().strftime('%H:%M:%S')}\n🔗 {current_url_safe(sb)}"
+    send_tg_photo(tmp_path, caption=caption)
+    return tmp_path
+
+
+# ─────────────────────────────────────────────
+# 结果卡片 & 文件写入
+# ─────────────────────────────────────────────
+
 def build_tg_card(ok: bool, data: dict | None = None, error: str = "") -> str:
     data = data or {}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status = "✅ 成功" if ok else "❌ 失败"
-    balance_before = data.get("balanceBeforeText") or "未读取"
-    balance_after = data.get("balanceAfterText") or "未读取"
-    balance_delta = data.get("balanceDeltaText") or "未读取"
     lines = [
         "🤖 AgentRouter 签到通知",
         "",
         f"🕒 运行时间: {now_str}",
         f"📊 结果: {status}",
-        f"💰 签到前余额: {balance_before}",
-        f"💵 签到后余额: {balance_after}",
-        f"📈 余额变动: {balance_delta}",
+        f"💰 签到前余额: {data.get('balanceBeforeText') or '未读取'}",
+        f"💵 签到后余额: {data.get('balanceAfterText') or '未读取'}",
+        f"📈 余额变动: {data.get('balanceDeltaText') or '未读取'}",
         f"🧪 判定依据: {data.get('reason') or ('OK' if ok else 'FAILED')}",
     ]
-    final_url = data.get("url") or ""
-    if final_url:
-        lines.append(f"🔗 最终页面: {final_url}")
+    if data.get("url"):
+        lines.append(f"🔗 最终页面: {data['url']}")
     if error:
         lines.append(f"⚠️ 异常: {error[:240]}")
     return "\n".join(lines)
@@ -241,6 +322,10 @@ def save_screenshot(sb: SB, path: str | None = None) -> str | None:
         return None
 
 
+# ─────────────────────────────────────────────
+# 浏览器参数
+# ─────────────────────────────────────────────
+
 def normalize_sb_proxy(proxy: str) -> str:
     value = proxy.strip()
     for prefix in ("socks5h://", "socks5://", "https://", "http://"):
@@ -255,8 +340,7 @@ def build_sb_args() -> dict:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     locale = (os.environ.get("BROWSER_LOCALE") or "").strip()
 
-    # ✅ USE_UC 已锁定为 False，此处不再传入 uc=True
-    args = {"test": True, "headed": True}
+    args = {"test": True, "headed": True}  # USE_UC 已硬锁为 False
     if chrome_path:
         args["binary_location"] = chrome_path
     if user_data_dir:
@@ -278,6 +362,10 @@ def build_sb_args() -> dict:
     args["chromium_arg"] = ",".join(chromium_args)
     return args
 
+
+# ─────────────────────────────────────────────
+# Chrome profile crash-state patch
+# ─────────────────────────────────────────────
 
 def patch_json_path(obj: dict, dotted_key: str, value) -> None:
     cur = obj
@@ -329,6 +417,10 @@ def dismiss_chrome_crash_prompt() -> None:
     except Exception as exc:
         log(f"crash prompt dismiss skipped: {exc}")
 
+
+# ─────────────────────────────────────────────
+# 页面操作工具
+# ─────────────────────────────────────────────
 
 def open_url(sb: SB, url: str, label: str) -> None:
     log(f"open {label}: {url}")
@@ -467,12 +559,10 @@ def click_github_login(sb: SB) -> None:
         time.sleep(0.15)
         subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
 
-        # 兜底：xvfb 虚拟屏幕可能导致 xdotool 坐标漂移，补一刀
         time.sleep(1.5)
         if "login" in current_url_safe(sb):
             log("xdotool 似乎未生效，强制启用 webdriver 兜底点击...")
             webdriver_click_github_login(sb)
-
         return
     except Exception as exc:
         log(f"xdotool GitHub click failed, fallback to WebDriver click: {exc}")
@@ -578,20 +668,45 @@ def switch_to_best_target_tab(sb: SB) -> None:
 
 
 def wait_for_login_success(sb: SB) -> None:
+    """等待登录完成，期间每隔 DEBUG_SCREENSHOT_INTERVAL 秒截图推送到 TG。"""
     deadline = time.time() + WAIT_AFTER_CLICK
     last_url = ""
+    last_screenshot_at = time.time()
+    screenshot_index = 0
+
+    # ✅ 点击后立即拍第一张，看按钮点击是否触发了跳转
+    debug_screenshot_and_push(sb, f"after_click_{screenshot_index:02d}")
+    screenshot_index += 1
+
     while time.time() < deadline:
         switch_to_best_target_tab(sb)
         url = current_url_safe(sb)
+
+        # URL 发生变化时立即截图
         if url != last_url:
             log(f"waiting login URL: {url}")
             last_url = url
+            debug_screenshot_and_push(sb, f"url_change_{screenshot_index:02d}")
+            screenshot_index += 1
+
         if is_logged_in_by_url(sb):
             log(f"login confirmed by console URL: {url}")
             return
+
         if is_waf_text(page_text_sample(sb)):
+            debug_screenshot_and_push(sb, f"waf_detected_{screenshot_index:02d}")
             raise RuntimeError("login flow hit WAF verification page")
+
+        # 定时截图（每 DEBUG_SCREENSHOT_INTERVAL 秒）
+        if time.time() - last_screenshot_at >= DEBUG_SCREENSHOT_INTERVAL:
+            debug_screenshot_and_push(sb, f"heartbeat_{screenshot_index:02d}")
+            screenshot_index += 1
+            last_screenshot_at = time.time()
+
         time.sleep(1)
+
+    # 超时前最后一张
+    debug_screenshot_and_push(sb, f"timeout_{screenshot_index:02d}")
     raise RuntimeError(f"timed out waiting for login success; current={current_url_safe(sb)}")
 
 
@@ -617,7 +732,10 @@ def compute_result(data: dict) -> bool:
     return False
 
 
-# ✅ 新增：代理连通性预检，失败立即抛出异常终止任务
+# ─────────────────────────────────────────────
+# 代理预检 & Cookie 注入
+# ─────────────────────────────────────────────
+
 def check_proxy_connectivity(sb: SB) -> None:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     if not proxy:
@@ -637,11 +755,9 @@ def check_proxy_connectivity(sb: SB) -> None:
     except Exception as exc:
         raise RuntimeError(f"代理节点不可达，终止任务防止浏览器挂死: {exc}") from exc
     finally:
-        # ✅ 恢复全局超时设置
         sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
 
 
-# ✅ 新增：GH_COOKIE 注入带超时保护，失败时跳过而不是挂死
 def inject_github_cookie(sb: SB) -> None:
     gh_cookie = (os.environ.get("GH_COOKIE") or "").strip()
     if not gh_cookie:
@@ -675,6 +791,10 @@ def inject_github_cookie(sb: SB) -> None:
     log("GitHub 尊贵身份注入完成！")
 
 
+# ─────────────────────────────────────────────
+# 主流程
+# ─────────────────────────────────────────────
+
 def main() -> None:
     user_loaded = load_env_file(USER_ENV_FILE)
     env_file_from_var = (os.environ.get("AGENTROUTER_ENV_FILE") or "").strip()
@@ -707,17 +827,20 @@ def main() -> None:
         with SB(**build_sb_args()) as sb:
             log("browser started")
 
-            # ✅ 启动后立即设置全局超时，防止任何页面挂死
+            # 全局超时保护
             sb.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
             sb.driver.set_script_timeout(SCRIPT_TIMEOUT)
 
             dismiss_chrome_crash_prompt()
 
-            # ✅ 代理预检（配置了代理才执行），不通直接抛异常终止
+            # 代理预检
             check_proxy_connectivity(sb)
 
-            # ✅ GH_COOKIE 注入（带 15s 超时保护，失败跳过不崩溃）
+            # GH_COOKIE 注入（带超时保护）
             inject_github_cookie(sb)
+
+            # ✅ 注入后立即截图，确认 GitHub 当前登录状态
+            debug_screenshot_and_push(sb, "after_cookie_inject")
 
             open_url(sb, SITE_URL, "site")
 
@@ -732,13 +855,20 @@ def main() -> None:
                 log("session appears logged out")
 
             open_url(sb, LOGIN_URL, "login")
+
+            # ✅ 打开登录页后截图，确认页面是否正常渲染
+            debug_screenshot_and_push(sb, "login_page_loaded")
+
             if is_logged_in_by_url(sb):
                 log("login URL redirected to logged-in session; logging out once more")
                 logout_via_api(sb)
                 open_url(sb, LOGIN_URL, "login after forced logout")
 
             click_github_login(sb)
+
+            # wait_for_login_success 内部会自动截图推送
             wait_for_login_success(sb)
+
             after_balance = open_wallet_and_read_balance(sb)
             data["balanceAfterText"] = after_balance.get("balanceText") or ""
             data["balanceAfterAmount"] = after_balance.get("balanceAmount") or ""
