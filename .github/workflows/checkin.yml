@@ -1,13 +1,110 @@
 name: 自动签到任务
 
 on:
-  workflow_dispatch: # 允许手动执行
+  workflow_dispatch:
+    inputs:
+      setup_profile:
+        description: '首次初始化 Profile？（输入 true 进入 VNC 手动登录模式）'
+        required: false
+        default: 'false'
   schedule:
     - cron: '30 0 * * *' # 每天 UTC 0:30 (北京时间 8:30)
 
+# ─────────────────────────────────────────────────────────────
+# JOB 1：首次初始化 Profile（手动触发，输入 setup_profile=true）
+# ─────────────────────────────────────────────────────────────
 jobs:
-  run-daily-checkin:
+  setup-profile:
+    name: 🔧 首次初始化 Chrome Profile（VNC 手动登录）
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.setup_profile == 'true'
+    steps:
+      - name: 1. 检出代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install seleniumbase
+          sbase install chromedriver
+          sudo apt-get update && sudo apt-get install -y xvfb x11vnc xdotool fluxbox
+
+      - name: 4. 按需拉起 Sing-Box 代理
+        if: env.PROXY_STR != ''
+        env:
+          PROXY_STR: ${{ secrets.PROXY_STR }}
+        run: |
+          echo "检测到代理配置，正在拉起 Sing-Box..."
+          curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
+          tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
+          sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
+          python convert_proxy.py
+          nohup sing-box run -c config.json > singbox.log 2>&1 &
+          sleep 3
+          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！\n" https://api.ipify.org || echo "代理可能未就绪"
+
+      - name: 5. 启动虚拟屏幕 + VNC + Chrome，等待手动登录
+        env:
+          PROXY_STR: ${{ secrets.PROXY_STR }}
+        run: |
+          mkdir -p ~/.chrome-profile-agentrouter
+
+          # 启动虚拟屏幕
+          Xvfb :99 -screen 0 1280x800x24 &
+          export DISPLAY=:99
+          sleep 1
+
+          # 启动轻量窗口管理器（让 Chrome 窗口正常显示）
+          fluxbox &
+          sleep 1
+
+          # 启动无密码 VNC（端口 5900）
+          x11vnc -display :99 -forever -nopw -bg -quiet
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║  VNC 已启动！请用 VNC 客户端连接 Runner IP:5900     ║"
+          echo "║  Runner IP 请在下方日志中查看                       ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          curl -s https://api.ipify.org && echo " ← Runner 公网 IP"
+
+          # 构造 Chrome 启动参数
+          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-session-crashed-bubble"
+
+          if [ -n "$PROXY_STR" ]; then
+            CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
+          fi
+
+          # 打开浏览器，直接到 AgentRouter 登录页
+          google-chrome $CHROME_ARGS https://agentrouter.org/login &
+
+          echo ""
+          echo "⏳ 等待 5 分钟供手动操作..."
+          echo "   请通过 VNC 完成 GitHub OAuth 登录，登录成功看到 /console 页面后"
+          echo "   不需要做其他操作，等待 Job 自动完成即可。"
+          sleep 300
+
+      - name: 6. 保存 Chrome Profile 到 Actions Cache
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1
+
+
+# ─────────────────────────────────────────────────────────────
+# JOB 2：每日自动签到
+# ─────────────────────────────────────────────────────────────
+  run-daily-checkin:
+    name: ✅ 每日自动签到
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.setup_profile != 'true')
     steps:
       - name: 1. 检出代码
         uses: actions/checkout@v4
@@ -23,39 +120,38 @@ jobs:
           pip install seleniumbase
           sbase install chromedriver
 
-      - name: 4. 安装虚拟显示外壳 (防崩溃)
+      - name: 4. 安装虚拟显示外壳
         run: sudo apt-get update && sudo apt-get install -y xvfb xdotool
 
-      - name: 5. 按需下载并配置 Sing-Box 代理
+      - name: 5. 恢复 Chrome Profile 缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1
+          # 即使 cache miss 也不报错，脚本会回退到 GH_COOKIE 注入
+          fail-on-cache-miss: false
+
+      - name: 6. 按需下载并配置 Sing-Box 代理
         if: env.PROXY_STR != ''
         env:
           PROXY_STR: ${{ secrets.PROXY_STR }}
         run: |
           echo "检测到代理配置，正在拉起 Sing-Box..."
-          # 下载预编译的 Linux sing-box 核心
           curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
           tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
           sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
-
-          # 生成 config.json
           python convert_proxy.py
-
-          # 后台静默挂起代理隧道
           nohup sing-box run -c config.json > singbox.log 2>&1 &
-
-          # 等待隧道连通
           sleep 3
+          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！\n" https://api.ipify.org || echo "代理可能未就绪，继续执行"
 
-          # 验证代理端口是否启动 (为保护节点隐私，不打印具体 IP)
-          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！" https://api.ipify.org || echo "代理可能未就绪，继续执行"
-
-      - name: 6. 执行签到脚本
+      - name: 7. 执行签到脚本
         env:
           GH_COOKIE: ${{ secrets.GH_COOKIE }}
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # ✅ 已移除 AGENTROUTER_USE_UC，不再启用 UC 模式
+          BROWSER_USER_DATA_DIR: /home/runner/.chrome-profile-agentrouter
         run: |
           if [ -n "$PROXY_STR" ]; then
             echo "启用 BROWSER_PROXY 走代理节点隧道 (使用更稳定的 HTTP 协议)"
@@ -63,5 +159,12 @@ jobs:
           else
             echo "未配置代理，使用原生 IP 直接访问"
           fi
-          # xvfb-run 伪装屏幕环境运行
           xvfb-run --auto-servernum python main.py
+
+      - name: 8. 回写更新后的 Chrome Profile 到缓存
+        uses: actions/cache/save@v4
+        # 无论签到成功失败都保存，确保 session 保持最新
+        if: always()
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1
