@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-07-09-diag"
+SCRIPT_REVISION = "2026-07-09-windowactivate"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -464,7 +464,26 @@ def click_github_login(sb: SB) -> None:
         time.sleep(0.5)
     if not (isinstance(last_result, dict) and last_result.get("found")):
         raise RuntimeError(f"GitHub login control not found: {last_result}")
+
     log(f"GitHub login control: text={last_result.get('text')} href={last_result.get('href')}")
+    try:
+        x = str(int(last_result["screenX"]))
+        y = str(int(last_result["screenY"]))
+        log(f"xdotool click GitHub login: x={x} y={y}")
+
+        # 强制激活 Chrome 窗口到前台
+        try:
+            subprocess.run(["xdotool", "search", "--name", "Agent", "windowactivate", "--sync"], timeout=5)
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+        subprocess.run(["xdotool", "mousemove", "--sync", x, y], check=True, timeout=5)
+        time.sleep(0.2)
+        subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
+        return
+    except Exception as exc:
+        log(f"xdotool click failed, fallback to WebDriver: {exc}")
     webdriver_click_github_login(sb)
 
 
@@ -658,32 +677,6 @@ def main() -> None:
                 open_url(sb, LOGIN_URL, "登录页（重新加载）")
 
             click_github_login(sb)
-
-            # ===== 诊断：检查点击后发生了什么 =====
-            time.sleep(3)
-            log(f"DIAG 点击后 URL: {current_url_safe(sb)}")
-            log(f"DIAG Tab 数量: {len(sb.driver.window_handles)}")
-            for i, h in enumerate(sb.driver.window_handles):
-                sb.driver.switch_to.window(h)
-                log(f"DIAG Tab[{i}] URL: {current_url_safe(sb)}")
-            sb.driver.switch_to.window(sb.driver.window_handles[0])
-
-            diag = sb.driver.execute_script("""
-                const iframes = document.querySelectorAll('iframe');
-                const modals = document.querySelectorAll('[role="dialog"], .modal, [class*="captcha"], [class*="challenge"]');
-                const popups = document.querySelectorAll('[class*="popup"], [class*="overlay"]');
-                return {
-                    title: document.title,
-                    iframeCount: iframes.length,
-                    iframeSrcs: Array.from(iframes).map(f => f.src).slice(0, 5),
-                    modalCount: modals.length,
-                    popupCount: popups.length,
-                    bodyText: document.body.innerText.slice(0, 500)
-                };
-            """)
-            log(f"DIAG 页面状态: {json.dumps(diag, ensure_ascii=False, indent=2)}")
-            # ===== 诊断结束 =====
-
             wait_for_login_success(sb)
 
             log("========== 步骤 5/7: 读取签到后余额 ==========")
