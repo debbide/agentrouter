@@ -120,7 +120,9 @@ jobs:
             --disable-session-crashed-bubble \
             --disable-dev-shm-usage \
             --no-sandbox \
-            --window-size=1280,800"
+            --window-size=1280,800 \
+            --lang=zh-CN \
+            --accept-lang=zh-CN,zh"
 
           if [ -n "$PROXY_STR" ]; then
             CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
