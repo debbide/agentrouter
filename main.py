@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-06-24-github-actions"
+SCRIPT_REVISION = "2026-07-09-webdriver-click"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -439,6 +439,7 @@ def locate_github_login_control(sb: SB) -> dict:
 
 
 def webdriver_click_github_login(sb: SB) -> None:
+    """通过 WebDriver 直接点击 GitHub 登录按钮（不依赖屏幕坐标）"""
     element = sb.driver.execute_script(
         r"""
         const loginText = arguments[0];
@@ -455,6 +456,7 @@ def webdriver_click_github_login(sb: SB) -> None:
 
 
 def click_github_login(sb: SB) -> None:
+    """定位并点击 GitHub 登录按钮（WebDriver 方式，不依赖坐标）"""
     deadline = time.time() + 20
     last_result = None
     while time.time() < deadline:
@@ -466,16 +468,6 @@ def click_github_login(sb: SB) -> None:
         raise RuntimeError(f"GitHub login control not found: {last_result}")
 
     log(f"GitHub login control: text={last_result.get('text')} href={last_result.get('href')}")
-    try:
-        x = str(int(last_result["screenX"]))
-        y = str(int(last_result["screenY"]))
-        log(f"xdotool click GitHub login: x={x} y={y}")
-        subprocess.run(["xdotool", "mousemove", x, y], check=True, timeout=5)
-        time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-        return
-    except Exception as exc:
-        log(f"xdotool GitHub click failed, fallback to WebDriver click: {exc}")
     webdriver_click_github_login(sb)
 
 
@@ -637,54 +629,59 @@ def main() -> None:
     screenshot_path = None
 
     try:
-        log("AgentRouter API-first check-in task started")
-        log(f"SCRIPT_REVISION: {SCRIPT_REVISION}")
-        log(f"SITE_URL: {SITE_URL}")
-        log(f"LOGIN_URL: {LOGIN_URL}")
-        log(f"AGENTROUTER_USE_UC: {int(USE_UC)}")
-        log(f"BROWSER_USER_DATA_DIR: {profile_dir}")
-        log(f"BROWSER_CHROME_PATH: {(os.environ.get('BROWSER_CHROME_PATH') or '').strip()}")
+        log("========== 步骤 1/7: 初始化环境 ==========")
+        log(f"脚本版本: {SCRIPT_REVISION}")
+        log(f"站点地址: {SITE_URL}")
+        log(f"登录页面: {LOGIN_URL}")
+        log(f"浏览器 Profile: {profile_dir}")
         normalize_profile_crash_state(profile_dir)
         cleanup_profile_locks(profile_dir)
 
         with SB(**build_sb_args()) as sb:
-            log("browser started")
+            log("========== 步骤 2/7: 启动浏览器 ==========")
             dismiss_chrome_crash_prompt()
-            open_url(sb, SITE_URL, "site")
+            open_url(sb, SITE_URL, "站点首页")
 
+            log("========== 步骤 3/7: 检查登录状态 ==========")
             before_balance = open_wallet_and_read_balance(sb)
             data["startLoggedIn"] = bool(before_balance.get("loggedIn"))
             data["balanceBeforeText"] = before_balance.get("balanceText") or ""
             data["balanceBeforeAmount"] = before_balance.get("balanceAmount") or ""
             if data["startLoggedIn"]:
-                log(f"already logged in, balance before: {data['balanceBeforeText'] or 'not found'}")
+                log(f"已登录，签到前余额: {data['balanceBeforeText'] or '未读取'}")
                 logout_via_api(sb)
             else:
-                log("session appears logged out")
+                log("未登录，准备执行登录流程")
 
-            open_url(sb, LOGIN_URL, "login")
+            log("========== 步骤 4/7: 执行 GitHub 登录 ==========")
+            open_url(sb, LOGIN_URL, "登录页")
             if is_logged_in_by_url(sb):
-                log("login URL redirected to logged-in session; logging out once more")
+                log("登录页跳转到了已登录会话，强制退出后重试")
                 logout_via_api(sb)
-                open_url(sb, LOGIN_URL, "login after forced logout")
+                open_url(sb, LOGIN_URL, "登录页（重新加载）")
 
             click_github_login(sb)
             wait_for_login_success(sb)
+
+            log("========== 步骤 5/7: 读取签到后余额 ==========")
             after_balance = open_wallet_and_read_balance(sb)
             data["balanceAfterText"] = after_balance.get("balanceText") or ""
             data["balanceAfterAmount"] = after_balance.get("balanceAmount") or ""
             data["url"] = current_url_safe(sb)
             screenshot_path = save_screenshot(sb)
 
+        log("========== 步骤 6/7: 判定结果 ==========")
         ok = compute_result(data)
         write_result(ok, error=None if ok else data.get("reason"), data=data, screenshot_path=screenshot_path)
+
+        log("========== 步骤 7/7: 发送通知 ==========")
         send_tg_message(build_tg_card(ok, data=data, error="" if ok else data.get("reason", "")))
         if not ok:
             raise RuntimeError(data.get("reason") or "check-in failed")
-        log(f"check-in completed: {data.get('reason')}")
+        log(f"签到完成: {data.get('reason')}")
     except Exception as exc:
         error = str(exc)
-        log(f"task failed: {error}")
+        log(f"任务失败: {error}")
         write_result(False, error=error, data=data, screenshot_path=screenshot_path)
         send_tg_message(build_tg_card(False, data=data, error=error))
         raise SystemExit(1)
