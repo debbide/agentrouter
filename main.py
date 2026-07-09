@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-07-09-windowactivate"
+SCRIPT_REVISION = "2026-07-09-js-dispatch"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -455,36 +455,36 @@ def webdriver_click_github_login(sb: SB) -> None:
 
 
 def click_github_login(sb: SB) -> None:
+    """用 JS 原生事件序列点击 GitHub 登录按钮（不依赖 xdotool/窗口焦点）"""
     deadline = time.time() + 20
-    last_result = None
+    found = False
     while time.time() < deadline:
-        last_result = locate_github_login_control(sb)
-        if last_result.get("found"):
+        result = sb.driver.execute_script(r"""
+            const loginText = arguments[0];
+            const visible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+            const target = controls.find((el) => visible(el) && (textOf(el) === loginText || /github/i.test(textOf(el))));
+            if (!target) return { found: false };
+            target.scrollIntoView({ block: 'center', inline: 'center' });
+            const rect = target.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                target.dispatchEvent(new MouseEvent(type, {
+                    bubbles: true, cancelable: true, view: window,
+                    clientX: x, clientY: y, button: 0
+                }));
+            }
+            return { found: true, text: textOf(target), x: Math.round(x), y: Math.round(y) };
+        """, LOGIN_TEXT)
+        if result and result.get("found"):
+            log(f"JS click GitHub login: text={result.get('text')} x={result.get('x')} y={result.get('y')}")
+            found = True
             break
         time.sleep(0.5)
-    if not (isinstance(last_result, dict) and last_result.get("found")):
-        raise RuntimeError(f"GitHub login control not found: {last_result}")
-
-    log(f"GitHub login control: text={last_result.get('text')} href={last_result.get('href')}")
-    try:
-        x = str(int(last_result["screenX"]))
-        y = str(int(last_result["screenY"]))
-        log(f"xdotool click GitHub login: x={x} y={y}")
-
-        # 强制激活 Chrome 窗口到前台
-        try:
-            subprocess.run(["xdotool", "search", "--name", "Agent", "windowactivate", "--sync"], timeout=5)
-            time.sleep(0.3)
-        except Exception:
-            pass
-
-        subprocess.run(["xdotool", "mousemove", "--sync", x, y], check=True, timeout=5)
-        time.sleep(0.2)
-        subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-        return
-    except Exception as exc:
-        log(f"xdotool click failed, fallback to WebDriver: {exc}")
-    webdriver_click_github_login(sb)
+    if not found:
+        raise RuntimeError("GitHub login control not found")
 
 
 def page_text_sample(sb: SB, limit: int = 5000) -> str:
