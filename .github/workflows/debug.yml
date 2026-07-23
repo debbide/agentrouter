@@ -85,10 +85,9 @@ jobs:
           rm -f ~/.chrome-profile-agentrouter/SingletonCookie
           echo "✅ 锁文件已清理"
 
-      - name: 8. 启动 noVNC + cloudflared + Chrome
+      - name: 8. 启动浏览器与代理并立刻生成链接
         env:
           PROXY_STR: ${{ secrets.PROXY_STR }}
-          WAIT_MINUTES: ${{ github.event.inputs.wait_minutes }}
           OPEN_URL: ${{ github.event.inputs.open_url }}
         run: |
           set -e
@@ -132,58 +131,38 @@ jobs:
             exit 1
           fi
 
-          # ====== 新增：输出链接到 GitHub Summary 和 Notice ======
           echo "::notice title=🔗 你的远程调试链接在这！::${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
-          
           echo "### 🔗 VNC 远程调试链接" >> $GITHUB_STEP_SUMMARY
           echo "[👉 点击这里一键进入远程桌面](${CF_URL}/vnc.html?autoconnect=true&reconnect=true)" >> $GITHUB_STEP_SUMMARY
           echo "> 💡 如果画面出不来，请多刷新几次网页，或者点击左侧齿轮设置调整画质。" >> $GITHUB_STEP_SUMMARY
-          # =======================================================
 
-          echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║  🌐 浏览器打开下面的链接远程操控 Chrome                     ║"
-          echo "║                                                              ║"
-          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
-          echo "║                                                              ║"
-          echo "║  打开后请手动检查：                                          ║"
-          echo "║  1. 访问 https://agentrouter.org/login                      ║"
-          echo "║  2. 点击 Continue with GitHub                                ║"
-          echo "║  3. 观察是否能正常跳转到 GitHub 并完成登录                   ║"
-          echo "║  4. 如果有验证码/CAPTCHA，请手动完成                        ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
-
-          # 构造目标 URL
           TARGET_URL="${OPEN_URL:-https://agentrouter.org/login}"
-
-          # 构造 Chrome 启动参数
-          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter \
-            --no-first-run \
-            --no-default-browser-check \
-            --disable-session-crashed-bubble \
-            --no-restore-last-session \
-            --disable-dev-shm-usage \
-            --no-sandbox \
-            --window-size=1280,800 \
-            --lang=zh-CN \
-            --accept-lang=zh-CN,zh"
-
+          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter --no-first-run --no-default-browser-check --disable-session-crashed-bubble --no-restore-last-session --disable-dev-shm-usage --no-sandbox --window-size=1280,800 --lang=zh-CN --accept-lang=zh-CN,zh"
+          
           if [ -n "$PROXY_STR" ]; then
             CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
-            echo "🌐 Chrome 已配置代理"
           fi
 
-          echo "🌐 目标页面: $TARGET_URL"
-
-          # 启动 Chrome
           rm -f ~/.chrome-profile-agentrouter/SingletonLock ~/.chrome-profile-agentrouter/SingletonSocket ~/.chrome-profile-agentrouter/SingletonCookie || true
           google-chrome $CHROME_ARGS --new-window "$TARGET_URL" >/tmp/chrome.log 2>&1 &
           echo $! > /tmp/chrome.pid
-          echo "✅ 已启动 Chrome (pid=$(cat /tmp/chrome.pid))"
+          echo "✅ 已启动 Chrome (pid=$(cat /tmp/chrome.pid))，马上进入下一步待机..."
+
+      - name: 9. 保持运行并监控 (⏳等待操作)
+        env:
+          WAIT_MINUTES: ${{ github.event.inputs.wait_minutes }}
+          OPEN_URL: ${{ github.event.inputs.open_url }}
+          PROXY_STR: ${{ secrets.PROXY_STR }}
+        run: |
+          TARGET_URL="${OPEN_URL:-https://agentrouter.org/login}"
+          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter --no-first-run --no-default-browser-check --disable-session-crashed-bubble --no-restore-last-session --disable-dev-shm-usage --no-sandbox --window-size=1280,800 --lang=zh-CN --accept-lang=zh-CN,zh"
+          
+          if [ -n "$PROXY_STR" ]; then
+            CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
+          fi
 
           WAIT_SECS=$(( ${WAIT_MINUTES:-5} * 60 ))
-          echo ""
-          echo "⏳ 等待 ${WAIT_MINUTES:-5} 分钟供远程操作..."
+          echo "⏳ 正在倒计时等待 ${WAIT_MINUTES:-5} 分钟，请立刻前往左侧的 Summary 面板获取调试链接！"
 
           # watchdog：Chrome 退出则重启
           for i in $(seq 1 $((WAIT_SECS/5))); do
@@ -191,24 +170,21 @@ jobs:
               PID=$(cat /tmp/chrome.pid)
               if ! kill -0 "$PID" >/dev/null 2>&1; then
                 echo "⚠️ Chrome 已退出，重启..."
-                tail -50 /tmp/chrome.log || true
                 rm -f ~/.chrome-profile-agentrouter/SingletonLock ~/.chrome-profile-agentrouter/SingletonSocket ~/.chrome-profile-agentrouter/SingletonCookie || true
                 google-chrome $CHROME_ARGS --new-window "$TARGET_URL" >/tmp/chrome.log 2>&1 &
                 echo $! > /tmp/chrome.pid
-                echo "✅ Chrome 已重启 (pid=$(cat /tmp/chrome.pid))"
               fi
             fi
             sleep 5
           done
 
-      - name: 9. 保存 Chrome Profile 到 Cache
+      - name: 10. 保存 Chrome Profile 到 Cache
         uses: actions/cache/save@v4
         if: always()
         with:
           path: ~/.chrome-profile-agentrouter
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
 
-      - name: 10. 完成
+      - name: 11. 完成
         run: |
           echo "✅ Chrome Profile 已保存"
-          echo "如果手动登录成功，后续签到任务将使用此 Profile"
