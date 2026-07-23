@@ -132,6 +132,14 @@ jobs:
             exit 1
           fi
 
+          # ====== 新增：输出链接到 GitHub Summary 和 Notice ======
+          echo "::notice title=🔗 你的远程调试链接在这！::${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
+          
+          echo "### 🔗 VNC 远程调试链接" >> $GITHUB_STEP_SUMMARY
+          echo "[👉 点击这里一键进入远程桌面](${CF_URL}/vnc.html?autoconnect=true&reconnect=true)" >> $GITHUB_STEP_SUMMARY
+          echo "> 💡 如果画面出不来，请多刷新几次网页，或者点击左侧齿轮设置调整画质。" >> $GITHUB_STEP_SUMMARY
+          # =======================================================
+
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
           echo "║  🌐 浏览器打开下面的链接远程操控 Chrome                     ║"
