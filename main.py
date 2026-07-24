@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-07-09-focus-fix-auto-login-v3"
+SCRIPT_REVISION = "2026-07-09-focus-fix-auto-login-uc-mode"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -24,7 +24,7 @@ WALLET_URL = "https://agentrouter.org/console/topup"
 LOGIN_TEXT = "使用 GitHub 继续"
 WAIT_AFTER_CLICK = 90.0
 READY_WAIT = 2.0
-USE_UC = False
+USE_UC = True # 🚨 强制开启反检测模式！
 TG_CHAT_ID = ""
 TG_TOKEN = ""
 TG_PROXY = ""
@@ -72,7 +72,7 @@ def refresh_config() -> None:
     LOGIN_TEXT = (os.environ.get("AGENTROUTER_LOGIN_TEXT") or "使用 GitHub 继续").strip()
     WAIT_AFTER_CLICK = float((os.environ.get("AGENTROUTER_WAIT_AFTER_CLICK") or "90").strip() or "90")
     READY_WAIT = float((os.environ.get("AGENTROUTER_READY_WAIT") or "2").strip() or "2")
-    USE_UC = (os.environ.get("AGENTROUTER_USE_UC") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    USE_UC = True  # 强制写死，不读环境变量了
     TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or os.environ.get("CHAT_ID") or "").strip()
     TG_TOKEN = (
         os.environ.get("TG_BOT_TOKEN")
@@ -339,6 +339,41 @@ def handle_github_login(sb: SB) -> None:
             log(f"OAuth 点击授权失败: {e}")
 
 
+def click_github_login(sb: SB) -> None:
+    # 彻底抛弃 xdotool，直接借助 UC 模式无痕点击！
+    log("尝试点击 GitHub 登录按钮 (底层 UC 模式)...")
+    
+    # 用简单的 JS 确保加载完毕
+    sb.wait_for_element('button, a, [role="button"]', timeout=15)
+    
+    try:
+        selectors = [
+            'button:contains("GitHub")',
+            'a:contains("GitHub")',
+            '[data-provider="github"]',
+            f'button:contains("{LOGIN_TEXT}")'
+        ]
+        for sel in selectors:
+            if sb.is_element_visible(sel, timeout=1):
+                try:
+                    sb.uc_click(sel)
+                    log(f"已点击按钮，触发跳转")
+                except:
+                    sb.click(sel)
+                    log(f"已点击按钮，触发跳转")
+                return
+                
+        # 兜底：如果上面的选择器没中，强制 JS 点击
+        sb.execute_script("""
+            const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+            const target = controls.find(el => el.innerText.includes('GitHub') || el.innerText.includes('Continue'));
+            if(target) target.click();
+        """)
+        log("执行了 JS 兜底点击")
+    except Exception as e:
+        log(f"原生点击失败: {e}")
+
+
 def build_tg_card(ok: bool, data: dict | None = None, error: str = "") -> str:
     data = data or {}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -403,9 +438,7 @@ def build_sb_args() -> dict:
     proxy = (os.environ.get("BROWSER_PROXY") or "").strip()
     locale = (os.environ.get("BROWSER_LOCALE") or "").strip()
 
-    args = {"test": True, "headed": True}
-    if USE_UC:
-        args["uc"] = True
+    args = {"test": True, "headed": True, "uc": True} # 强制使用 UC 模式！
     if chrome_path:
         args["binary_location"] = chrome_path
     if user_data_dir:
@@ -418,8 +451,6 @@ def build_sb_args() -> dict:
         "--disable-dev-shm-usage",
         "--hide-crash-restore-bubble",
         "--disable-session-crashed-bubble",
-        "--no-first-run",
-        "--no-default-browser-check",
     ]
     if proxy:
         chromium_args.append(f"--proxy-server={proxy}")
@@ -493,19 +524,12 @@ def cleanup_profile_locks(user_data_dir: str) -> None:
 
 
 def dismiss_chrome_crash_prompt() -> None:
-    try:
-        subprocess.run(["xdotool", "key", "Escape"], check=True)
-        time.sleep(0.2)
-        subprocess.run(["xdotool", "key", "Escape"], check=True)
-        log("crash prompt dismiss keys sent")
-    except Exception as exc:
-        log(f"crash prompt dismiss skipped: {exc}")
+    pass # UC模式下通常不会遇到，直接略过复杂的系统级敲击
 
 
 def open_url(sb: SB, url: str, label: str) -> None:
     log(f"open {label}: {url}")
-    sb.open(url)
-    time.sleep(READY_WAIT)
+    sb.uc_open_with_reconnect(url, reconnect_time=READY_WAIT)
     log(f"{label} URL: {current_url_safe(sb)}")
 
 
@@ -547,147 +571,6 @@ def logout_via_api(sb: SB) -> None:
     if not (isinstance(body, dict) and body.get("success")):
         raise RuntimeError(f"logout API failed: {result}")
     time.sleep(1)
-
-
-def locate_github_login_control(sb: SB) -> dict:
-    result = sb.driver.execute_script(
-        r"""
-        const loginText = arguments[0];
-        const visible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-        const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const hrefOf = (el) => el.href || el.getAttribute('href') || '';
-        const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-        const candidates = [];
-        for (const el of controls) {
-          if (!visible(el)) continue;
-          if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-          const text = textOf(el);
-          const href = hrefOf(el);
-          const hasGithubLogo = !!el.querySelector("img[aria-label='github_logo'], svg[class*='github'], .semi-icon-github_logo");
-          const exactText = text === loginText;
-          const githubText = /github/i.test(text) || text.includes('GitHub');
-          const githubHref = /github/i.test(href);
-          if (!exactText && !githubText && !githubHref && !hasGithubLogo) continue;
-          const r = el.getBoundingClientRect();
-          candidates.push({ el, text, href, hasGithubLogo, exactText, githubText, githubHref, area: Math.max(1, r.width * r.height) });
-        }
-        candidates.sort((a, b) => {
-          const score = (item) =>
-            (item.exactText ? 1000 : 0) +
-            (item.githubText ? 500 : 0) +
-            (item.githubHref ? 300 : 0) +
-            (item.hasGithubLogo ? 100 : 0);
-          return score(b) - score(a) || b.area - a.area;
-        });
-        const pick = candidates[0];
-        if (!pick) {
-          return { found: false, candidates: candidates.map((item) => ({ text: item.text, href: item.href })) };
-        }
-        const target = pick.el;
-        target.scrollIntoView({ block: 'center', inline: 'center' });
-        const r = target.getBoundingClientRect();
-        const borderX = Math.max(0, ((window.outerWidth || 0) - (window.innerWidth || 0)) / 2);
-        const topChrome = Math.max(0, (window.outerHeight || 0) - (window.innerHeight || 0) - borderX);
-        return {
-          found: true,
-          text: textOf(target),
-          href: hrefOf(target),
-          viewportX: r.left + r.width / 2,
-          viewportY: r.top + r.height / 2,
-          screenX: Math.round((window.screenX || 0) + borderX + r.left + r.width / 2),
-          screenY: Math.round((window.screenY || 0) + topChrome + r.top + r.height / 2)
-        };
-        """,
-        LOGIN_TEXT,
-    )
-    return result if isinstance(result, dict) else {"found": False, "raw": result}
-
-
-def webdriver_click_github_login(sb: SB) -> None:
-    element = sb.driver.execute_script(
-        r"""
-        const loginText = arguments[0];
-        const visible = (el) => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-        const textOf = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-        return controls.find((el) => visible(el) && (textOf(el) === loginText || /github/i.test(textOf(el)))) || null;
-        """,
-        LOGIN_TEXT,
-    )
-    if not element:
-        raise RuntimeError("GitHub login control not found for WebDriver click")
-    element.click()
-
-
-def get_chrome_window_id() -> str | None:
-    try:
-        result = subprocess.run(
-            ["xdotool", "search", "--onlyvisible", "--name", ""],
-            capture_output=True, text=True, timeout=5
-        )
-        for wid in result.stdout.strip().split("\n"):
-            wid = wid.strip()
-            if not wid:
-                continue
-            name_result = subprocess.run(
-                ["xdotool", "getwindowname", wid],
-                capture_output=True, text=True, timeout=5
-            )
-            name = name_result.stdout.strip()
-            if any(kw in name.lower() for kw in ["chrome", "agent router", "github", "chromium"]):
-                return wid
-    except Exception as exc:
-        pass
-    return None
-
-
-def click_github_login(sb: SB) -> None:
-    deadline = time.time() + 20
-    last_result = None
-    while time.time() < deadline:
-        last_result = locate_github_login_control(sb)
-        if last_result.get("found"):
-            break
-        time.sleep(0.5)
-    if not (isinstance(last_result, dict) and last_result.get("found")):
-        raise RuntimeError(f"GitHub login control not found: {last_result}")
-
-    log(f"找到 GitHub 登录按钮: {last_result.get('text')}，准备发起点击...")
-    
-    # 第1重：尝试物理点击 (xdotool)
-    try:
-        x = str(int(last_result["screenX"]))
-        y = str(int(last_result["screenY"]))
-        
-        chrome_wid = get_chrome_window_id()
-        if chrome_wid:
-            subprocess.run(["xdotool", "windowactivate", "--sync", chrome_wid], timeout=5)
-            time.sleep(0.3)
-            subprocess.run(["xdotool", "windowfocus", "--sync", chrome_wid], timeout=5)
-            time.sleep(0.2)
-
-        subprocess.run(["xdotool", "mousemove", "--sync", x, y], timeout=5)
-        time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], timeout=5)
-        log("第1重：xdotool 物理点击执行完毕")
-    except Exception as exc:
-        log(f"第1重：xdotool 点击异常: {exc}")
-        
-    time.sleep(2)
-    if 'github.com' not in current_url_safe(sb):
-        log("第1重物理点击疑似失效，启动 第2重：JS 注入点击...")
-        try:
-            webdriver_click_github_login(sb)
-        except Exception as e:
-            log(f"第2重 JS 点击异常: {e}")
-            
-    time.sleep(2)
-    if 'github.com' not in current_url_safe(sb):
-        log("第2重疑似失效，启动 第3重：SeleniumBase 原生强制点击...")
-        try:
-            sb.click('button:contains("GitHub"), a:contains("GitHub"), [data-provider="github"]', timeout=3)
-        except Exception as e:
-            log(f"第3重强点异常: {e}")
 
 
 def page_text_sample(sb: SB, limit: int = 5000) -> str:
@@ -861,12 +744,6 @@ def main() -> None:
 
         with SB(**build_sb_args()) as sb:
             log("========== 步骤 2/7: 启动浏览器 ==========")
-            try:
-                sb.driver.maximize_window()
-                log("窗口强制最大化完毕，确保坐标准确")
-            except:
-                pass
-            dismiss_chrome_crash_prompt()
             open_url(sb, SITE_URL, "站点首页")
 
             log("========== 步骤 3/7: 检查登录状态 ==========")
