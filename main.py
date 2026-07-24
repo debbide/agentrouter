@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-07-09-focus-fix"
+SCRIPT_REVISION = "2026-07-09-focus-fix-auto-login"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -28,6 +28,8 @@ USE_UC = False
 TG_CHAT_ID = ""
 TG_TOKEN = ""
 TG_PROXY = ""
+GH_USERNAME = ""
+GH_PASSWORD = ""
 
 
 def log(message: str) -> None:
@@ -62,7 +64,7 @@ def load_env_file(env_file_path: str) -> bool:
 
 def refresh_config() -> None:
     global SITE_URL, LOGIN_URL, WALLET_URL, LOGIN_TEXT, WAIT_AFTER_CLICK, READY_WAIT, USE_UC
-    global TG_CHAT_ID, TG_TOKEN, TG_PROXY
+    global TG_CHAT_ID, TG_TOKEN, TG_PROXY, GH_USERNAME, GH_PASSWORD
 
     SITE_URL = (os.environ.get("AGENTROUTER_SITE_URL") or "https://agentrouter.org").strip().rstrip("/")
     LOGIN_URL = (os.environ.get("AGENTROUTER_LOGIN_URL") or f"{SITE_URL}/login").strip()
@@ -85,6 +87,8 @@ def refresh_config() -> None:
         or os.environ.get("all_proxy")
         or ""
     ).strip()
+    GH_USERNAME = (os.environ.get("GH_USERNAME") or "").strip()
+    GH_PASSWORD = (os.environ.get("GH_PASSWORD") or "").strip()
 
 
 def host_from_url(url: str) -> str:
@@ -172,6 +176,167 @@ def send_tg_message(text: str) -> None:
         log("TG text push sent")
     except Exception as exc:
         log(f"TG text push failed: {exc}")
+
+
+def get_tg_updates_via_curl(offset: int | None = None) -> dict:
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates?timeout=5"
+    if offset:
+        url += f"&offset={offset}"
+    
+    cmd = ["curl", "-sS", "--max-time", "15"]
+    proxy = normalize_socks_proxy(TG_PROXY)
+    if proxy and TG_PROXY.startswith("socks"):
+        cmd.extend(["--socks5-hostname", proxy])
+    elif proxy:
+        cmd.extend(["-x", proxy])
+        
+    cmd.append(url)
+    
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20)
+        return json.loads(proc.stdout)
+    except:
+        return {}
+
+
+def tg_wait_code(timeout=90) -> str:
+    if not TG_TOKEN or not TG_CHAT_ID:
+        log("TG 未配置，无法获取验证码")
+        return ""
+    log(f"开始等待验证码回复 (超时 {timeout}s)...")
+    
+    offset = None
+    data = get_tg_updates_via_curl()
+    if data.get("ok") and data.get("result"):
+        offset = data["result"][-1]["update_id"] + 1
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = get_tg_updates_via_curl(offset)
+        if data.get("ok") and data.get("result"):
+            for upd in data["result"]:
+                offset = upd["update_id"] + 1
+                msg = upd.get("message", {})
+                if str(msg.get("chat", {}).get("id")) == str(TG_CHAT_ID):
+                    text = (msg.get("text") or "").strip()
+                    match = re.search(r"\b(\d{6})\b", text)
+                    if match:
+                        return match.group(1)
+        time.sleep(2)
+    return ""
+
+
+def handle_github_login(sb: SB) -> None:
+    time.sleep(3)
+    url = current_url_safe(sb)
+    
+    if 'github.com' not in url:
+        return 
+        
+    if 'github.com/login' in url or 'github.com/session' in url:
+        log("进入 GitHub 登录页，开始全自动登录...")
+        
+        if sb.is_element_visible('input[name="login"]'):
+            if not GH_USERNAME or not GH_PASSWORD:
+                log("⚠️ 遇到 GitHub 登录页，但未配置 GH_USERNAME 或 GH_PASSWORD 环境变量，尝试跳过")
+            else:
+                log("填写账号密码...")
+                sb.type('input[name="login"]', GH_USERNAME)
+                time.sleep(0.5)
+                sb.type('input[name="password"]', GH_PASSWORD)
+                time.sleep(0.5)
+                sb.click('input[type="submit"], button[type="submit"]')
+                try:
+                    sb.wait_for_element('input, button', timeout=10)
+                except:
+                    pass
+            
+        url = current_url_safe(sb)
+        
+        if 'verified-device' in url or 'device-verification' in url:
+            log("需要设备验证...")
+            send_tg_message("⚠️ GitHub 需要设备验证，请去绑定邮箱点击授权链接！脚本正等待60秒...")
+            for i in range(60):
+                time.sleep(1)
+                url = current_url_safe(sb)
+                if 'verified-device' not in url and 'device-verification' not in url:
+                    log("设备验证通过！")
+                    send_tg_message("✅ 设备验证通过")
+                    break
+                if i % 5 == 0 and i > 0:
+                    try:
+                        sb.refresh_page()
+                    except:
+                        pass
+                        
+        url = current_url_safe(sb)
+        if 'two-factor' in url:
+            log("需要 2FA 两步验证...")
+            
+            try:
+                if sb.is_element_visible('button:contains("More options")'):
+                    sb.click('button:contains("More options")')
+                    time.sleep(1)
+                if sb.is_element_visible('button:contains("Authenticator app")'):
+                    sb.click('button:contains("Authenticator app")')
+                    time.sleep(2)
+            except:
+                pass
+            try:
+                if sb.is_element_visible('a:contains("Use an authentication app")'):
+                    sb.click('a:contains("Use an authentication app")')
+                    time.sleep(2)
+            except:
+                pass
+
+            url = current_url_safe(sb)
+            if 'two-factor/mobile' in url:
+                send_tg_message("⚠️ 需要两步验证（GitHub Mobile），请打开手机 GitHub App 批准本次登录！等待中...")
+                log("等待手机 GitHub App 批准...")
+                for i in range(45):
+                    time.sleep(2)
+                    if 'two-factor' not in current_url_safe(sb):
+                        break
+            else:
+                send_tg_message(f"🔐 需要 GitHub 两步验证码\n\n用户 {GH_USERNAME} 正在登录，请直接在此聊天框回复 6 位数字验证码：")
+                log("等待 TG 回复验证码...")
+                code = tg_wait_code(timeout=90)
+                if code:
+                    log(f"收到验证码: {code}")
+                    selectors = [
+                        'input[autocomplete="one-time-code"]',
+                        'input[name="app_otp"]',
+                        'input#app_totp',
+                        'input#otp',
+                        'input[inputmode="numeric"]'
+                    ]
+                    typed = False
+                    for sel in selectors:
+                        if sb.is_element_visible(sel):
+                            sb.type(sel, code)
+                            typed = True
+                            break
+                    if typed:
+                        time.sleep(1)
+                        try:
+                            if sb.is_element_visible('button:contains("Verify")'):
+                                sb.click('button:contains("Verify")')
+                            else:
+                                sb.execute_script("document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}));")
+                            time.sleep(3)
+                        except:
+                            pass
+                else:
+                    log("未在 TG 收到 6 位数验证码，将超时失败。")
+
+    url = current_url_safe(sb)
+    if 'login/oauth/authorize' in url:
+        log("遇到 OAuth 授权页面，自动点击授权...")
+        try:
+            sb.click('button[name="authorize"], button:contains("Authorize")')
+            time.sleep(3)
+        except Exception as e:
+            log(f"OAuth 点击授权失败: {e}")
 
 
 def build_tg_card(ok: bool, data: dict | None = None, error: str = "") -> str:
@@ -455,7 +620,6 @@ def webdriver_click_github_login(sb: SB) -> None:
 
 
 def get_chrome_window_id() -> str | None:
-    """通过 xdotool 找到 Chrome 窗口 ID"""
     try:
         result = subprocess.run(
             ["xdotool", "search", "--onlyvisible", "--name", ""],
@@ -470,7 +634,6 @@ def get_chrome_window_id() -> str | None:
                 capture_output=True, text=True, timeout=5
             )
             name = name_result.stdout.strip()
-            log(f"xdotool 窗口 {wid}: {name}")
             if any(kw in name.lower() for kw in ["chrome", "agent router", "github", "chromium"]):
                 return wid
     except Exception as exc:
@@ -479,7 +642,6 @@ def get_chrome_window_id() -> str | None:
 
 
 def click_github_login(sb: SB) -> None:
-    """用 xdotool 点击 GitHub 登录按钮（先聚焦 Chrome 窗口）"""
     deadline = time.time() + 20
     last_result = None
     while time.time() < deadline:
@@ -494,18 +656,13 @@ def click_github_login(sb: SB) -> None:
     try:
         x = str(int(last_result["screenX"]))
         y = str(int(last_result["screenY"]))
-        log(f"xdotool click GitHub login: x={x} y={y}")
-
-        # 聚焦 Chrome 窗口
+        
         chrome_wid = get_chrome_window_id()
         if chrome_wid:
-            log(f"聚焦 Chrome 窗口: {chrome_wid}")
             subprocess.run(["xdotool", "windowactivate", "--sync", chrome_wid], timeout=5)
             time.sleep(0.3)
             subprocess.run(["xdotool", "windowfocus", "--sync", chrome_wid], timeout=5)
             time.sleep(0.2)
-        else:
-            log("未找到 Chrome 窗口，直接点击")
 
         subprocess.run(["xdotool", "mousemove", "--sync", x, y], check=True, timeout=5)
         time.sleep(0.15)
@@ -554,7 +711,7 @@ def read_balance_from_page(sb: SB) -> dict:
         if isinstance(payload, dict) and payload.get("balanceText"):
             return payload
     except Exception as exc:
-        log(f"read balance from page failed: {exc}")
+        pass
     return {"balanceText": "", "balanceAmount": "", "sample": ""}
 
 
@@ -617,6 +774,12 @@ def switch_to_best_target_tab(sb: SB) -> None:
 def wait_for_login_success(sb: SB) -> None:
     deadline = time.time() + WAIT_AFTER_CLICK
     last_url = ""
+    
+    try:
+        handle_github_login(sb)
+    except Exception as e:
+        log(f"自动登录处理异常: {e}")
+
     while time.time() < deadline:
         switch_to_best_target_tab(sb)
         url = current_url_safe(sb)
@@ -676,9 +839,6 @@ def main() -> None:
     try:
         log("========== 步骤 1/7: 初始化环境 ==========")
         log(f"脚本版本: {SCRIPT_REVISION}")
-        log(f"站点地址: {SITE_URL}")
-        log(f"登录页面: {LOGIN_URL}")
-        log(f"浏览器 Profile: {profile_dir}")
         normalize_profile_crash_state(profile_dir)
         cleanup_profile_locks(profile_dir)
 
@@ -701,7 +861,6 @@ def main() -> None:
             log("========== 步骤 4/7: 执行 GitHub 登录 ==========")
             open_url(sb, LOGIN_URL, "登录页")
             if is_logged_in_by_url(sb):
-                log("登录页跳转到了已登录会话，强制退出后重试")
                 logout_via_api(sb)
                 open_url(sb, LOGIN_URL, "登录页（重新加载）")
 
