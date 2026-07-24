@@ -466,6 +466,7 @@ def locate_github_login_control(sb: SB) -> dict:
         }
         const target = pick.el;
         target.scrollIntoView({ block: 'center', inline: 'center' });
+        const r = target.getBoundingClientRect();
         return {
           found: true,
           text: textOf(target),
@@ -823,4 +824,77 @@ def compute_result(data: dict) -> bool:
 def main() -> None:
     user_loaded = load_env_file(USER_ENV_FILE)
     env_file_from_var = (os.environ.get("AGENTROUTER_ENV_FILE") or "").strip()
-    if env_file_
+    if env_file_from_var and env_file_from_var != USER_ENV_FILE:
+        load_env_file(env_file_from_var)
+    elif not user_loaded:
+        log("no external env file loaded; using current process env only")
+    refresh_config()
+
+    profile_dir = (os.environ.get("BROWSER_USER_DATA_DIR") or "").strip()
+    data = {
+        "siteUrl": SITE_URL,
+        "loginUrl": LOGIN_URL,
+        "loginText": LOGIN_TEXT,
+        "profileDir": profile_dir,
+        "scriptRevision": SCRIPT_REVISION,
+    }
+    screenshot_path = None
+
+    try:
+        log("AgentRouter check-in task started")
+        log(f"SCRIPT_REVISION: {SCRIPT_REVISION}")
+        log(f"SITE_URL: {SITE_URL}")
+        log(f"LOGIN_URL: {LOGIN_URL}")
+        log(f"AGENTROUTER_USE_UC: {int(USE_UC)}")
+        log(f"BROWSER_USER_DATA_DIR: {profile_dir}")
+        log(f"BROWSER_CHROME_PATH: {(os.environ.get('BROWSER_CHROME_PATH') or '').strip()}")
+        log(f"GH_USERNAME set: {bool(GH_USERNAME)} / GH_PASSWORD set: {bool(GH_PASSWORD)}")
+        normalize_profile_crash_state(profile_dir)
+        cleanup_profile_locks(profile_dir)
+
+        with SB(**build_sb_args()) as sb:
+            log("browser started")
+            dismiss_chrome_crash_prompt()
+            open_url(sb, SITE_URL, "site")
+
+            before_balance = open_wallet_and_read_balance(sb)
+            data["startLoggedIn"] = bool(before_balance.get("loggedIn"))
+            data["balanceBeforeText"] = before_balance.get("balanceText") or ""
+            data["balanceBeforeAmount"] = before_balance.get("balanceAmount") or ""
+            if data["startLoggedIn"]:
+                log(f"already logged in, balance before: {data['balanceBeforeText'] or 'not found'}")
+                logout_via_api(sb)
+            else:
+                log("session appears logged out")
+
+            open_url(sb, LOGIN_URL, "login")
+            if is_logged_in_by_url(sb):
+                log("login URL redirected to logged-in session; logging out once more")
+                logout_via_api(sb)
+                open_url(sb, LOGIN_URL, "login after forced logout")
+
+            click_github_login(sb)
+            wait_for_login_success(sb)
+
+            after_balance = open_wallet_and_read_balance(sb)
+            data["balanceAfterText"] = after_balance.get("balanceText") or ""
+            data["balanceAfterAmount"] = after_balance.get("balanceAmount") or ""
+            data["url"] = current_url_safe(sb)
+            screenshot_path = save_screenshot(sb)
+
+        ok = compute_result(data)
+        write_result(ok, error=None if ok else data.get("reason"), data=data, screenshot_path=screenshot_path)
+        send_tg_message(build_tg_card(ok, data=data, error="" if ok else data.get("reason", "")))
+        if not ok:
+            raise RuntimeError(data.get("reason") or "check-in failed")
+        log(f"check-in completed: {data.get('reason')}")
+    except Exception as exc:
+        error = str(exc)
+        log(f"task failed: {error}")
+        write_result(False, error=error, data=data, screenshot_path=screenshot_path)
+        send_tg_message(build_tg_card(False, data=data, error=error))
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
