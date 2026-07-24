@@ -38,7 +38,7 @@ jobs:
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
           restore-keys: |
             chrome-profile-agentrouter-v1-
-          fail-on-cache-miss: true
+          fail-on-cache-miss: false
 
       - name: 6. 验证 Profile 完整性
         run: |
