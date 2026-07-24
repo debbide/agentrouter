@@ -28,8 +28,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -U seleniumbase
 
-      - name: 4. 安装虚拟显示外壳
-        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool
+      - name: 4. 安装虚拟显示外壳及窗口管理器
+        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool fluxbox
 
       - name: 5. 恢复 Chrome Profile 缓存
         uses: actions/cache/restore@v4
@@ -38,7 +38,7 @@ jobs:
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
           restore-keys: |
             chrome-profile-agentrouter-v1-
-          fail-on-cache-miss: false  # 🚨 关键修改：找不到缓存不能报错，要让后面去自动登录
+          fail-on-cache-miss: false
 
       - name: 6. 验证 Profile 完整性
         run: |
@@ -48,7 +48,6 @@ jobs:
           else
             echo "✅ Profile 目录结构完整"
           fi
-          # 🚨 关键修改：去掉了 exit 1，绝不提前跑路
 
       - name: 7. 按需下载并配置 Sing-Box 代理
         if: env.PROXY_STR != ''
@@ -73,8 +72,8 @@ jobs:
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          GH_USERNAME: ${{ secrets.GH_USERNAME }} # 🚨 新增：传入账号
-          GH_PASSWORD: ${{ secrets.GH_PASSWORD }} # 🚨 新增：传入密码
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
           BROWSER_USER_DATA_DIR: /home/runner/.chrome-profile-agentrouter
         run: |
           if [ -n "$PROXY_STR" ]; then
@@ -83,7 +82,7 @@ jobs:
           else
             echo "未配置代理，使用原生 IP 直接访问"
           fi
-          xvfb-run --auto-servernum python main.py
+          xvfb-run --auto-servernum sh -c "fluxbox & sleep 1 && python main.py"
 
       - name: 9. 仅在签到成功时回存 Profile
         uses: actions/cache/save@v4
