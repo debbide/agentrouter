@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-07-09-focus-fix-auto-login"
+SCRIPT_REVISION = "2026-07-09-focus-fix-auto-login-v3"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -637,7 +637,7 @@ def get_chrome_window_id() -> str | None:
             if any(kw in name.lower() for kw in ["chrome", "agent router", "github", "chromium"]):
                 return wid
     except Exception as exc:
-        log(f"get_chrome_window_id 失败: {exc}")
+        pass
     return None
 
 
@@ -652,7 +652,9 @@ def click_github_login(sb: SB) -> None:
     if not (isinstance(last_result, dict) and last_result.get("found")):
         raise RuntimeError(f"GitHub login control not found: {last_result}")
 
-    log(f"GitHub login control: text={last_result.get('text')} href={last_result.get('href')}")
+    log(f"找到 GitHub 登录按钮: {last_result.get('text')}，准备发起点击...")
+    
+    # 第1重：尝试物理点击 (xdotool)
     try:
         x = str(int(last_result["screenX"]))
         y = str(int(last_result["screenY"]))
@@ -664,13 +666,28 @@ def click_github_login(sb: SB) -> None:
             subprocess.run(["xdotool", "windowfocus", "--sync", chrome_wid], timeout=5)
             time.sleep(0.2)
 
-        subprocess.run(["xdotool", "mousemove", "--sync", x, y], check=True, timeout=5)
+        subprocess.run(["xdotool", "mousemove", "--sync", x, y], timeout=5)
         time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-        return
+        subprocess.run(["xdotool", "click", "1"], timeout=5)
+        log("第1重：xdotool 物理点击执行完毕")
     except Exception as exc:
-        log(f"xdotool click failed, fallback to WebDriver: {exc}")
-    webdriver_click_github_login(sb)
+        log(f"第1重：xdotool 点击异常: {exc}")
+        
+    time.sleep(2)
+    if 'github.com' not in current_url_safe(sb):
+        log("第1重物理点击疑似失效，启动 第2重：JS 注入点击...")
+        try:
+            webdriver_click_github_login(sb)
+        except Exception as e:
+            log(f"第2重 JS 点击异常: {e}")
+            
+    time.sleep(2)
+    if 'github.com' not in current_url_safe(sb):
+        log("第2重疑似失效，启动 第3重：SeleniumBase 原生强制点击...")
+        try:
+            sb.click('button:contains("GitHub"), a:contains("GitHub"), [data-provider="github"]', timeout=3)
+        except Exception as e:
+            log(f"第3重强点异常: {e}")
 
 
 def page_text_sample(sb: SB, limit: int = 5000) -> str:
@@ -844,6 +861,11 @@ def main() -> None:
 
         with SB(**build_sb_args()) as sb:
             log("========== 步骤 2/7: 启动浏览器 ==========")
+            try:
+                sb.driver.maximize_window()
+                log("窗口强制最大化完毕，确保坐标准确")
+            except:
+                pass
             dismiss_chrome_crash_prompt()
             open_url(sb, SITE_URL, "站点首页")
 
